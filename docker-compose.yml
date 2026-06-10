@@ -1,0 +1,20 @@
+# Fast DDS 发现依赖组播/广播，容器内需 host 网络才能与同网段 DDS 互通。
+# 用法: docker compose build && docker compose up
+services:
+  alarmsys:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: alarmsys-linux:latest
+    network_mode: host
+    ipc: host
+    environment:
+      LD_LIBRARY_PATH: /usr/local/fastdds3/lib
+      # 可选：打印航迹样本（前几条 + 每 500 条）
+      ALARMSYS_TRACE_TRACK: "1"
+    working_dir: /app
+    # 如需覆盖配置可取消注释：
+    # volumes:
+    #   - ./runtime/db.ini:/app/db.ini:ro
+    #   - ./runtime/Config.ini:/app/Config.ini:ro
+    restart: unless-stopped

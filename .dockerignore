@@ -1,0 +1,8 @@
+build/
+.git/
+**/*.o
+**/*.a
+*.log
+bin/alarmsys
+.vscode/
+.idea/

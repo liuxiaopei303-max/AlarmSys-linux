@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <profiles>
+        <participant profile_name="participant_newtrack_alarm_single">
+            <rtps>
+                <builtin>
+                    <discovery_config>
+                        <discoveryProtocol>CLIENT</discoveryProtocol>
+                        <discoveryServersList>
+                            <locator>
+                                <udpv4>
+                                    <address>192.168.18.141</address>
+                                    <port>11611</port>
+                                </udpv4>
+                            </locator>
+                        </discoveryServersList>
+                    </discovery_config>
+                </builtin>
+                <defaultUnicastLocatorList>
+                    <locator>
+                        <udpv4>
+                            <address>172.18.114.3</address>
+                            <port>11858</port>
+                        </udpv4>
+                    </locator>
+                </defaultUnicastLocatorList>
+            </rtps>
+        </participant>
+    </profiles>
+</dds>

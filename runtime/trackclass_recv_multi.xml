@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <profiles>
+        <!-- 与 track_class/trackclass_recv_multi.xml 一致；域 ID 见 Config.ini [Basic] TrackDDSPort（现场为 141） -->
+        <participant profile_name="participant_trackclass_recv_multi">
+            <rtps>
+                <builtin>
+                    <discovery_config>
+                        <discoveryProtocol>CLIENT</discoveryProtocol>
+                        <discoveryServersList>
+                            <locator>
+                                <udpv4>
+                                    <address>192.168.18.141</address>
+                                    <port>11611</port>
+                                </udpv4>
+                            </locator>
+                        </discoveryServersList>
+                    </discovery_config>
+                </builtin>
+                <defaultMulticastLocatorList>
+                    <locator>
+                        <udpv4>
+                            <address>239.255.0.1</address>
+                            <port>12355</port>
+                        </udpv4>
+                    </locator>
+                </defaultMulticastLocatorList>
+            </rtps>
+        </participant>
+    </profiles>
+</dds>

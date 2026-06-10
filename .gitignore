@@ -1,0 +1,24 @@
+build/
+.git/
+
+# 编译产物与运行日志
+bin/alarmsys
+bin/track_*
+bin/logs/
+bin/crash/
+bin/*.log
+bin/Config.ini
+
+# 构建中间文件
+**/*.o
+**/*.a
+**/*.d
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.autogen/
+
+# IDE
+.vscode/
+.idea/
+*.user

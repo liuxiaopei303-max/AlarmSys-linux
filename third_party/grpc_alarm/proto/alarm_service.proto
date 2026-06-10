@@ -1,0 +1,460 @@
+syntax = "proto3";
+
+package trackmanager.grpc.alarm;
+
+// 与 IDL EnvironmentType 对齐。
+//
+// 当前用于区分对海/对空融合链路。
+// 同一个 target_id 在不同 environment 下应视为不同缓存键。
+enum EnvironmentType {
+  ENVIRONMENT_TYPE_UNSPECIFIED = 0;
+
+  // 未知环境。
+  UNKNOWN = 1;
+
+  // 陆地。
+  LAND = 2;
+
+  // 空中。
+  AIR = 3;
+
+  // 水面。
+  SURFACE = 4;
+
+  // 水下。
+  SUBSURFACE = 5;
+
+  // 太空。
+  SPACE = 6;
+
+  // 海上。
+  MARITIME = 7;
+}
+
+// 与 IDL AltitudeReference 对齐。
+//
+// 用于 GeoPosition.altitude_ref，表示高度字段的参考基准。
+enum AltitudeReference {
+  // 未指定；不建议业务主动使用，除非确实没有高度参考类型。
+  ALTITUDE_REFERENCE_UNSPECIFIED = 0;
+
+  // 高度字段表示“相对 WGS84 椭球面高度”。
+  HEIGHT_ABOVE_WGS84 = 1;
+
+  // 高度字段表示“相对地面高度”。
+  HEIGHT_ABOVE_GROUND = 2;
+
+  // 高度字段表示“相对海平面高度”。
+  HEIGHT_ABOVE_SEA_SURFACE = 3;
+
+  // 高度字段表示“海面以下深度”。
+  BELOW_SEA_SURFACE = 4;
+}
+
+// 与 IDL ThreatLevel 对齐。
+//
+// 用于告警等级。
+enum ThreatLevel {
+  // 低等级告警。
+  LOW = 0;
+
+  // 中等级告警。
+  MEDIUM = 1;
+
+  // 高等级告警。
+  HIGH = 2;
+}
+
+// 与 IDL AlarmCategory 对齐。
+//
+// 说明：
+// 1. categories 是“标签数组”，一条告警可以同时带多个类别
+// 2. 例如纯测向行为告警，可以同时带：
+//    RF_DETECTION + BEARING_ONLY + TARGET_BEHAVIOR
+enum AlarmCategory {
+  // 区域类告警，例如目标进入警戒区、越界等。
+  TRACK_AREA = 0;
+
+  // 目标行为告警，例如盘旋、加速、异常机动、异常开机等。
+  TARGET_BEHAVIOR = 1;
+
+  // 目标属性告警，例如类型异常、身份异常、属性变化等。
+  TARGET_ATTR = 2;
+
+  // 设备告警，例如传感器、雷达、光电设备自身状态异常。
+  DEVICE = 3;
+
+  // 光电探测/发现类告警。
+  EO_DETECTION = 4;
+
+  // 雷达探测/发现类告警。
+  RADAR_DETECTION = 5;
+
+  // 无线电侦收/电子侦察探测类告警。
+  RF_DETECTION = 6;
+
+  // 纯测向告警。
+  // 语义：只有方位，没有经纬度落点。
+  BEARING_ONLY = 7;
+
+  // 测向估距告警。
+  // 语义：有方位和估计距离，但没有精确经纬度落点。
+  BEARING_RANGE_ESTIMATE = 8;
+
+  // 自定义告警类型。
+  CUSTOM1 = 9;
+}
+
+// 与 IDL AlarmLifecycleStatus 对齐。
+//
+// 表示告警生命周期状态。
+enum AlarmLifecycleStatus {
+  // 活跃中的告警。
+  ACTIVE = 0;
+
+  // 已取消的告警。
+  CANCELED = 1;
+
+  // 已删除的告警。
+  DELETED = 2;
+
+  // 重点关注中的告警。
+  FOCUS = 3;
+
+  // 自动恢复/自动取消的告警。
+  AUTO_RESOLVED = 4;
+}
+
+// 与 IDL AlarmDispositionStatus 对齐。
+//
+// 表示告警处置/查证状态。
+enum AlarmDispositionStatus {
+  // 未分配资源处理。
+  UNASSIGNED = 0;
+
+  // 已分配资源，正在查证中。
+  ASSIGNED = 1;
+
+  // 查证失败。
+  VERIFY_FAILED = 2;
+
+  // 查证成功。
+  VERIFY_SUCCESS = 3;
+}
+
+// 与 IDL AlarmLocationType 对齐。
+//
+// 说明：
+// 1. 这是“空间表达方式”
+// 2. 不是“告警业务类型”
+// 3. 业务类型看 AlarmCategory，空间表达看 AlarmSpatialInfo.location_type
+enum AlarmLocationType {
+  // 告警有明确经纬度点位。
+  POINT = 0;
+
+  // 纯测向，只有方位，没有落点。
+  BEARING_ONLY_LOCATION = 1;
+
+  // 测向 + 估计距离。
+  BEARING_RANGE_LOCATION = 2;
+
+  // 区域/扇区表达。
+  AREA_LOCATION = 3;
+
+  // 空间信息未知或未提供。
+  UNKNOWN_LOCATION = 4;
+}
+
+// 与 IDL Measurement 对齐。
+//
+// 用于表达带不确定性的标量，例如估计距离。
+message Measurement {
+  // 测量值本身。
+  double value = 1;
+
+  // 估计一个标准差，对应 IDL sigma。
+  double sigma = 2;
+}
+
+// 与 IDL GeoPosition 对齐。
+//
+// 用于：
+// 1. 告警位置 position
+// 2. spatial_info.point_position
+// 3. spatial_info.reference_position
+message GeoPosition {
+  // 经度，WGS84，单位度。
+  double longitude = 1;
+
+  // 纬度，WGS84，单位度。
+  double latitude = 2;
+
+  // 高度，单位米。
+  double altitude = 3;
+
+  // 相对地面高度，单位米。
+  double altitude_agl_m = 4;
+
+  // 高于海床高度，单位米。
+  double altitude_afs_m = 5;
+
+  // 压力深度，单位米。
+  double pressure_depth_m = 6;
+
+  // true 表示这是二维位置，没有可靠高度。
+  bool is_2d = 7;
+
+  // 高度参考类型。
+  AltitudeReference altitude_ref = 8;
+}
+
+// 与 IDL EntityRef 对齐。
+//
+// 这里通常用于 spatial_info.source_sensor。
+message EntityRef {
+  // 被引用实体类型，例如 sensor / source / target / rule。
+  string entity_type = 1;
+
+  // 被引用实体 ID。
+  string entity_id = 2;
+
+  // 被引用实体显示名称。
+  string entity_name = 3;
+}
+
+// 与 IDL AlarmAreaRef 对齐。
+//
+// 用于区域类告警关联的区域信息。
+message AlarmAreaRef {
+  string area_id = 1;
+  string area_name = 2;
+}
+
+// 与 IDL EODetectionBox 对齐。
+//
+// 仅当 has_detection_box=true 时，调用方应填写 detection_box。
+message EODetectionBox {
+  string camera_id = 1;
+  uint64 sync_header = 2;
+  uint64 box_id = 3;
+  uint64 track_id = 4;
+  int64 class_id = 5;
+  int64 behavior_id = 6;
+  double x = 7;
+  double y = 8;
+  double width = 9;
+  double height = 10;
+  double center_x = 11;
+  double center_y = 12;
+  double confidence = 13;
+}
+
+// 与 IDL AlarmSpatialInfo 对齐。
+//
+// 这是完整的告警空间描述结构。
+//
+// 使用规则：
+// 1. 普通点位告警：
+//    location_type=POINT
+//    has_point_position=true
+//    point_position 填值
+//
+// 2. 纯测向告警：
+//    location_type=BEARING_ONLY_LOCATION
+//    has_reference_position=true
+//    reference_position + bearing_deg 填值
+//
+// 3. 测向估距告警：
+//    location_type=BEARING_RANGE_LOCATION
+//    has_reference_position=true
+//    reference_position + bearing_deg + has_range_estimate=true
+message AlarmSpatialInfo {
+  // 空间表达方式。
+  AlarmLocationType location_type = 1;
+
+  // 是否有明确点位（field 2，wire 名 has_point_position）。
+  bool point_position_set = 2;
+
+  // 明确点位；仅当 point_position_set=true 时有效。
+  GeoPosition point_position = 3;
+
+  // 是否有测向参考点/观测点（field 4）。
+  bool reference_position_set = 4;
+
+  // 参考点/传感器位置。
+  GeoPosition reference_position = 5;
+
+  // 方位角，单位度。
+  double bearing_deg = 6;
+
+  // 方位标准差/误差，单位度。
+  double bearing_sigma_deg = 7;
+
+  // 是否携带估计距离（field 8）。
+  bool range_estimate_set = 8;
+
+  // 估计距离，单位米。
+  Measurement range_estimate_m = 9;
+
+  // 是否携带距离下界（field 10）。
+  bool range_min_set = 10;
+
+  // 距离下界。
+  Measurement range_min_m = 11;
+
+  // 是否携带距离上界（field 12）。
+  bool range_max_set = 12;
+
+  // 距离上界。
+  Measurement range_max_m = 13;
+
+  // 区域/扇区起始方位，单位度。
+  double sector_start_deg = 14;
+
+  // 区域/扇区终止方位，单位度。
+  double sector_end_deg = 15;
+
+  // 空间表达置信度，建议范围 0~1。
+  double spatial_confidence = 16;
+
+  // 产生该空间信息的设备/传感器。
+  EntityRef source_sensor = 17;
+}
+
+// 与 IDL TargetAlarmItem 对齐。
+//
+// 这是一条“完整告警项”，服务端会按该结构缓存并最终写入 TargetObject.alarms。
+message AlarmItem {
+  // 告警唯一 ID，必填。
+  string alarm_id = 1;
+
+  // 告警类别数组，可多种。
+  repeated AlarmCategory categories = 2;
+
+  // 生命周期状态。
+  AlarmLifecycleStatus status = 3;
+
+  // 处置状态。
+  AlarmDispositionStatus disposition = 4;
+
+  // 告警内容。
+  string content = 5;
+
+  // 告警等级。
+  ThreatLevel level = 6;
+
+  // 关联区域；非区域告警可传空对象。
+  AlarmAreaRef area = 7;
+
+  // 目标类型 ID；没有可填 0。
+  int64 class_id = 8;
+
+  // 行为 ID；没有可填 0。
+  int64 behavior_id = 9;
+
+  // 告警位置。
+  // 对于纯测向类告警，这个字段仍可传一个空位置对象，
+  // 真正的空间表达以 spatial_info 为准。
+  GeoPosition position = 10;
+
+  // 告警空间信息。
+  AlarmSpatialInfo spatial_info = 11;
+
+  // 告警产生时间，单位秒，建议 Unix 时间戳。
+  double raised_time = 12;
+
+  // 告警更新时间，单位秒，建议 Unix 时间戳。
+  double updated_time = 13;
+
+  // 解决时间；未解决可填 0。
+  double resolved_time = 14;
+
+  // 解决用户 ID；没有可为空。
+  string resolved_by = 15;
+
+  // 解决详情；没有可为空。
+  string resolution_details = 16;
+
+  // 触发规则 ID 列表；没有可为空数组。
+  repeated string rule_ids = 17;
+
+  // 是否携带检测框（field 18）。
+  bool detection_box_set = 18;
+
+  // 检测框；仅当 detection_box_set=true 时有效。
+  EODetectionBox detection_box = 19;
+}
+
+// 单个目标当前时刻的一条告警记录。
+//
+// 业务约束：
+// 1. 一个目标当前最多一条告警
+// 2. 一次 gRPC 请求里可以包含多个目标的告警
+message TargetAlarmRecord {
+  // 环境域标识。
+  // 必填，用于区分对海与对空链路。
+  EnvironmentType environment = 1;
+
+  // 目标唯一标识。
+  // 服务端使用 environment + target_id 作为联合缓存 key。
+  string target_id = 2;
+
+  // 调用方/生产者标识。
+  string producer_id = 3;
+
+  // 本条目标告警生成时间，单位秒，建议 Unix 时间戳。
+  double update_time = 4;
+
+  // 当前目标对应的一条完整告警。
+  AlarmItem alarm = 5;
+}
+
+// 当前时刻的全量目标告警快照。
+//
+// 调用语义：
+// 1. items 是“当前所有有告警目标”的完整列表
+// 2. 每个 item 对应“某个环境域中的一个目标”的一条告警
+// 3. 服务端收到后会按 environment + target_id 分别整体替换缓存
+// 4. items 为空数组表示当前没有任何目标告警
+message AlarmSnapshotRequest {
+  // 当前全量目标告警列表。
+  repeated TargetAlarmRecord items = 1;
+}
+
+// 服务端统一响应。
+message UpdateAck {
+  // true 表示本次请求已被接受并写入缓存。
+  // false 表示未写入，例如请求过旧。
+  bool accepted = 1;
+
+  // 目标 ID。
+  // 当前接口是批量请求，这里固定返回 "*" 表示本次响应针对整批请求。
+  string target_id = 2;
+
+  // 域名称；当前固定为 alarm。
+  string domain = 3;
+
+  // 服务端处理时间，单位秒，Unix 时间戳。
+  double server_time = 4;
+
+  // 结果原因，例如：
+  // ok / stale_update / invalid_target_id
+  string reason = 5;
+}
+
+// 告警结果接收服务。
+//
+// 对接方式：
+// 1. 外部模块主动调用本服务
+// 2. 把“当前所有有告警目标”的完整快照推送给本系统
+// 3. 本系统按 target_id 分别缓存最新单条告警
+// 4. 航迹主链路发送 DDS 前读取该缓存并写入 TargetObject.alarms
+service AlarmResultService {
+  // 更新当前时刻的全量目标告警快照。
+  //
+  // 再强调一次：
+  // - 这是全量快照接口
+  // - 不是增量告警更新接口
+  // - items=[] 表示当前没有任何目标告警
+  rpc UpdateAlarmSnapshot(AlarmSnapshotRequest) returns (UpdateAck);
+}
