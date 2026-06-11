@@ -7,6 +7,7 @@
 #include <QReadLocker>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 double rad2deg(double rad)
 {
@@ -74,46 +75,26 @@ void logAlarmTraceThrottled(const QString& key, const QString& content, qint64 i
 	logAlarmTrace(content);
 }
 
-constexpr qint64 kStableUniqueIdThreshold = 100000LL;
-
-qint64 trackMapUniqueIdByTrackId(CustomConfig* cfg, int trackId, int targetType)
+bool trackHasPublishedAlarm(CustomConfig* cfg, qint64 targetId, qint64 windowMs)
 {
-	if (!cfg || trackId <= 0)
-		return 0;
-
-	QReadLocker rl(&cfg->m_trackDataLock);
-	if (targetType == 3 && cfg->m_mapBirdFuseTrack.contains(trackId)) {
-		return static_cast<qint64>(cfg->m_mapBirdFuseTrack.value(trackId).secondary.uniqueID);
+	if (cfg == nullptr || targetId <= 0 || windowMs <= 0)
+		return false;
+	QMutexLocker locker(&cfg->m_alarmDataMutex);
+	const qint64 timeNow = QDateTime::currentDateTime().toMSecsSinceEpoch();
+	for (QMap<QString, AlarmData>::const_iterator it = cfg->m_mapAlarmData.constBegin();
+	     it != cfg->m_mapAlarmData.constEnd();
+	     ++it) {
+		if (static_cast<qint64>(it.value().unique_id) != targetId || it.value().alarm_status == 2)
+			continue;
+		QDateTime t0 = QDateTime::fromString(it.value().time, QStringLiteral("yyyy-MM-dd hh:mm:ss.zzz"));
+		if (!t0.isValid())
+			t0 = QDateTime::fromString(it.value().time, QStringLiteral("yyyy-MM-dd hh:mm:ss"));
+		if (!t0.isValid())
+			continue;
+		if (timeNow - t0.toMSecsSinceEpoch() < windowMs)
+			return true;
 	}
-	if (targetType == 0 && cfg->m_mapFuseTrack.contains(trackId)) {
-		return static_cast<qint64>(cfg->m_mapFuseTrack.value(trackId).secondary.uniqueID);
-	}
-	if (cfg->m_mapBirdFuseTrack.contains(trackId)) {
-		const qint64 uid = static_cast<qint64>(cfg->m_mapBirdFuseTrack.value(trackId).secondary.uniqueID);
-		if (uid >= kStableUniqueIdThreshold)
-			return uid;
-	}
-	if (cfg->m_mapFuseTrack.contains(trackId)) {
-		const qint64 uid = static_cast<qint64>(cfg->m_mapFuseTrack.value(trackId).secondary.uniqueID);
-		if (uid >= kStableUniqueIdThreshold)
-			return uid;
-	}
-	return 0;
-}
-
-qint64 effectiveUniqueIdForAlarm(CustomConfig* cfg, int trackId, qint64 incoming, qint64 existing, int targetType)
-{
-	if (incoming >= kStableUniqueIdThreshold)
-		return incoming;
-	if (existing >= kStableUniqueIdThreshold)
-		return existing;
-
-	const qint64 fromTrack = trackMapUniqueIdByTrackId(cfg, trackId, targetType);
-	if (fromTrack >= kStableUniqueIdThreshold)
-		return fromTrack;
-	if (incoming > 0)
-		return incoming;
-	return existing;
+	return false;
 }
 
 QString birdSkipIdsToString(const QSet<int>& ids)
@@ -127,7 +108,7 @@ QString birdSkipIdsToString(const QSet<int>& ids)
 	return parts.join(QLatin1Char(','));
 }
 
-void logBirdAreaCandidate(int mapKey, const SPxPacketTrackExtended& tr, const QString& conditionId)
+void logBirdAreaCandidate(qint64 mapKey, const SPxPacketTrackExtended& tr, const QString& conditionId)
 {
 	logAlarmTraceThrottled(
 		QStringLiteral("bird_area_cand_%1").arg(mapKey),
@@ -209,28 +190,6 @@ void appendPolygonPoints(const QString& areaPoints, int areaType, AlarmArea& ale
 		else if (areaType == 3)
 			alertArea.m_alertAreaPolygon.append(pt);
 	}
-}
-
-bool trackHasPublishedAlarm(CustomConfig* cfg, int trackId, qint64 windowMs)
-{
-	if (cfg == nullptr || trackId < 0 || windowMs <= 0)
-		return false;
-	QMutexLocker locker(&cfg->m_alarmDataMutex);
-	const qint64 timeNow = QDateTime::currentDateTime().toMSecsSinceEpoch();
-	for (QMap<QString, AlarmData>::const_iterator it = cfg->m_mapAlarmData.constBegin();
-	     it != cfg->m_mapAlarmData.constEnd();
-	     ++it) {
-		if (it.value().track_id != trackId || it.value().alarm_status == 2)
-			continue;
-		QDateTime t0 = QDateTime::fromString(it.value().time, QStringLiteral("yyyy-MM-dd hh:mm:ss.zzz"));
-		if (!t0.isValid())
-			t0 = QDateTime::fromString(it.value().time, QStringLiteral("yyyy-MM-dd hh:mm:ss"));
-		if (!t0.isValid())
-			continue;
-		if (timeNow - t0.toMSecsSinceEpoch() < windowMs)
-			return true;
-	}
-	return false;
 }
 
 } // namespace
@@ -322,8 +281,15 @@ void TrackAlarmThread::run()
 	}
 }
 
-void TrackAlarmThread::SaveToDB(AlarmRule info, int id, qint64 uniqueid, float lat, float lon, float speed, float dir, float dis, int TargetType, int threatScore, int timestampSec, int radarSourceId)
+void TrackAlarmThread::SaveToDB(AlarmRule info, qint64 targetId, float lat, float lon, float speed, float dir, float dis, int TargetType, int threatScore, int timestampSec, int radarSourceId)
 {
+	if (targetId <= 0) {
+		logAlarmTrace(QStringLiteral("SaveToDB skip invalid target_id------targetId:%1 conditionId:%2")
+			.arg(targetId)
+			.arg(info.condition_id));
+		return;
+	}
+
 	const AlarmLogicConfig& al = gConfig->m_alarmLogic;
 	const bool saveDb = al.saveAlarmToDb != 0;
 	AlarmData dbWriteAlarm;
@@ -339,8 +305,9 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, int id, qint64 uniqueid, float l
 
 	auto matchesDedupKey = [&](const AlarmData& ad) {
 		if (al.dedupMatchConditionAndTrack)
-			return ad.condition_id == info.condition_id && ad.track_id == id;
-		return ad.track_id == id;
+			return ad.condition_id == info.condition_id
+				&& static_cast<qint64>(ad.unique_id) == targetId;
+		return static_cast<qint64>(ad.unique_id) == targetId;
 	};
 
 	while (it != gConfig->m_mapAlarmData.end())
@@ -355,9 +322,9 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, int id, qint64 uniqueid, float l
 				isNew = false;
 				sendAlarm = it.value();
 				logAlarmTraceThrottled(
-					QStringLiteral("dedup_hit_%1_%2").arg(id).arg(info.condition_id),
-					QStringLiteral("SaveToDB dedup hit------trackId:%1 conditionId:%2 alarmId:%3 ageMs:%4 dedupMs:%5 nextCount:%6")
-						.arg(id)
+					QStringLiteral("dedup_hit_%1_%2").arg(targetId).arg(info.condition_id),
+					QStringLiteral("SaveToDB dedup hit------targetId:%1 conditionId:%2 alarmId:%3 ageMs:%4 dedupMs:%5 nextCount:%6")
+						.arg(targetId)
 						.arg(info.condition_id)
 						.arg(sendAlarm.alarm_id)
 						.arg(ageMs)
@@ -367,9 +334,9 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, int id, qint64 uniqueid, float l
 				break;
 			}
 			logAlarmTraceThrottled(
-				QStringLiteral("dedup_expired_%1_%2").arg(id).arg(info.condition_id),
-				QStringLiteral("SaveToDB dedup expired------trackId:%1 conditionId:%2 prevAlarmId:%3 ageMs:%4 dedupMs:%5")
-					.arg(id)
+				QStringLiteral("dedup_expired_%1_%2").arg(targetId).arg(info.condition_id),
+				QStringLiteral("SaveToDB dedup expired------targetId:%1 conditionId:%2 prevAlarmId:%3 ageMs:%4 dedupMs:%5")
+					.arg(targetId)
 					.arg(info.condition_id)
 					.arg(it.value().alarm_id)
 					.arg(ageMs)
@@ -387,15 +354,6 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, int id, qint64 uniqueid, float l
 		return QDateTime::fromSecsSinceEpoch(static_cast<qint64>(timestampSec)).toString(QStringLiteral("yyyy-MM-dd hh:mm:ss.zzz"));
 	};
 
-	const qint64 threatTimeMs = [&]() -> qint64 {
-		if (!al.originTimeFromTrackMsg)
-			return QDateTime::currentDateTime().toMSecsSinceEpoch();
-		if (al.originTrackTimeIsMs)
-			return static_cast<qint64>(timestampSec);
-		return static_cast<qint64>(timestampSec) * 1000LL;
-	}();
-	const qint64 alarmTimeMs = QDateTime::currentMSecsSinceEpoch();
-
 	if (isNew)
 	{
 		AlarmData newAlarm;
@@ -406,19 +364,8 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, int id, qint64 uniqueid, float l
 		newAlarm.mode_id = 1;
 		newAlarm.alarm_count = 1;
 		newAlarm.threatScore = threatScore;
-		newAlarm.unique_id = effectiveUniqueIdForAlarm(gConfig, id, uniqueid, 0, TargetType);
-		if (newAlarm.unique_id <= 0) {
-			logAlarmTrace(QStringLiteral("SaveToDB new skip_unique_id------trackId:%1 conditionId:%2 incoming:%3 resolved:%4")
-				.arg(id)
-				.arg(info.condition_id)
-				.arg(uniqueid)
-				.arg(newAlarm.unique_id));
-		} else if (newAlarm.unique_id != uniqueid && uniqueid > 0 && uniqueid < kStableUniqueIdThreshold) {
-			logAlarmTrace(QStringLiteral("SaveToDB new unique_id repair------trackId:%1 incoming:%2 resolved:%3")
-				.arg(id)
-				.arg(uniqueid)
-				.arg(newAlarm.unique_id));
-		}
+		newAlarm.unique_id = targetId;
+		newAlarm.track_id = 0;
 		if (gConfig->m_struBasicConfig.m_nUseBasePoint == 1)
 		{
 			newAlarm.targetdist = CommonFunc::GetDistance(lon, lat, gConfig->m_struBasicConfig.m_dBasePointLon, gConfig->m_struBasicConfig.m_dBasePointLat)/1852.0;
@@ -433,7 +380,6 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, int id, qint64 uniqueid, float l
 		newAlarm.targetlat = lat;
 		newAlarm.targetlon = lon;
 		newAlarm.targetspeed = speed;
-		newAlarm.track_id = id;
 		if(radarSourceId != 0)
 			newAlarm.targettype = radarSourceId;
 		newAlarm.group_id = info.group_id;
@@ -442,7 +388,6 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, int id, qint64 uniqueid, float l
 		newAlarm.time = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz");
 		newAlarm.origintime = buildOriginTime();
 		newAlarm.alarm_status = 0;
-		// system_evaluation_data.threat_time（毫秒）：与下方 new threat 日志 timeOrigin/timeNow 同源
 		newAlarm.threat_time_ms = al.originTimeFromTrackMsg
 			? (al.originTrackTimeIsMs ? static_cast<qint64>(timestampSec)
 						  : static_cast<qint64>(timestampSec) * 1000LL)
@@ -452,12 +397,12 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, int id, qint64 uniqueid, float l
 		int timestampNow = QDateTime::currentDateTime().toSecsSinceEpoch();
 		qint64 timestrampOrigin = static_cast<qint64>(timestampSec);
 
-		QString log = "new threat------trackId:"+ QString::number(newAlarm.track_id)+"   timeNow:" + QString::number(timestampNow)+ "   timeNowStr:"+QDateTime::fromSecsSinceEpoch(timestampNow).toString("yyyy-MM-dd hh:mm:ss.zzz")+ "   timeOrigin:"+QString::number(timestrampOrigin)+ "   timeOriginStr:"+buildOriginTime();
+		QString log = "new threat------targetId:"+ QString::number(newAlarm.unique_id)+"   timeNow:" + QString::number(timestampNow)+ "   timeNowStr:"+QDateTime::fromSecsSinceEpoch(timestampNow).toString("yyyy-MM-dd hh:mm:ss.zzz")+ "   timeOrigin:"+QString::number(timestrampOrigin)+ "   timeOriginStr:"+buildOriginTime();
 		AlarmFileLogger::logNewAlarmTrack(log);
 
-		qDebug() << "new Alarm id=" << newAlarm.track_id << endl;
-		logAlarmTrace(QStringLiteral("SaveToDB new------trackId:%1 conditionId:%2 alarmId:%3 threatScore:%4 speed:%5 type:%6")
-			.arg(newAlarm.track_id)
+		qDebug() << "new Alarm target_id=" << newAlarm.unique_id << endl;
+		logAlarmTrace(QStringLiteral("SaveToDB new------targetId:%1 conditionId:%2 alarmId:%3 threatScore:%4 speed:%5 type:%6")
+			.arg(newAlarm.unique_id)
 			.arg(info.condition_id)
 			.arg(newAlarm.alarm_id)
 			.arg(threatScore)
@@ -471,28 +416,13 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, int id, qint64 uniqueid, float l
 	}
 	else
 	{
-		
-		//if (sendAlarm.alarm_status != 2)
-		
 			sendAlarm.targetlat = lat;
 			sendAlarm.targetlon = lon;
 			sendAlarm.targetspeed = speed;
 			sendAlarm.alarm_count += 1;
 			sendAlarm.threatScore = threatScore;
-			{
-				const qint64 prevUnique = sendAlarm.unique_id;
-				sendAlarm.unique_id = effectiveUniqueIdForAlarm(gConfig, id, uniqueid, sendAlarm.unique_id, TargetType);
-				if (sendAlarm.unique_id != uniqueid && uniqueid > 0 && uniqueid < kStableUniqueIdThreshold) {
-					logAlarmTraceThrottled(
-						QStringLiteral("unique_repair_%1").arg(id),
-						QStringLiteral("SaveToDB unique_id repair------trackId:%1 incoming:%2 prev:%3 resolved:%4")
-							.arg(id)
-							.arg(uniqueid)
-							.arg(prevUnique)
-							.arg(sendAlarm.unique_id),
-						5000);
-				}
-			}
+			sendAlarm.unique_id = targetId;
+			sendAlarm.track_id = 0;
 			if (radarSourceId != 0)
 				sendAlarm.targettype = radarSourceId;
 			sendAlarm.group_id = info.group_id;
@@ -522,9 +452,9 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, int id, qint64 uniqueid, float l
 			else
 			{
 				logAlarmTraceThrottled(
-					QStringLiteral("save_status_%1_%2").arg(id).arg(sendAlarm.alarm_status),
-					QStringLiteral("SaveToDB skip db update------trackId:%1 alarmId:%2 alarm_status:%3 count:%4")
-						.arg(sendAlarm.track_id)
+					QStringLiteral("save_status_%1_%2").arg(targetId).arg(sendAlarm.alarm_status),
+					QStringLiteral("SaveToDB skip db update------targetId:%1 alarmId:%2 alarm_status:%3 count:%4")
+						.arg(sendAlarm.unique_id)
 						.arg(sendAlarm.alarm_id)
 						.arg(sendAlarm.alarm_status)
 						.arg(sendAlarm.alarm_count),
@@ -532,11 +462,11 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, int id, qint64 uniqueid, float l
 			}
 			
 			gConfig->m_mapAlarmData.insert(sendAlarm.alarm_id, sendAlarm);
-			qDebug() << "old Alarm id=" << sendAlarm.track_id <<"count="<<sendAlarm.alarm_count << endl;
+			qDebug() << "old Alarm target_id=" << sendAlarm.unique_id <<"count="<<sendAlarm.alarm_count << endl;
 			logAlarmTraceThrottled(
-				QStringLiteral("save_old_%1_%2").arg(id).arg(info.condition_id),
-				QStringLiteral("SaveToDB old------trackId:%1 conditionId:%2 alarmId:%3 count:%4 threatScore:%5 speed:%6")
-					.arg(sendAlarm.track_id)
+				QStringLiteral("save_old_%1_%2").arg(targetId).arg(info.condition_id),
+				QStringLiteral("SaveToDB old------targetId:%1 conditionId:%2 alarmId:%3 count:%4 threatScore:%5 speed:%6")
+					.arg(sendAlarm.unique_id)
 					.arg(info.condition_id)
 					.arg(sendAlarm.alarm_id)
 					.arg(sendAlarm.alarm_count)
@@ -553,9 +483,9 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, int id, qint64 uniqueid, float l
 		} else {
 			const bool success = gConfig->dbHelper.updateAlarmData(dbWriteAlarm.alarm_id, dbWriteAlarm);
 			if (!success) {
-				qDebug() << "updatafailed=" << dbWriteAlarm.track_id << endl;
-				logAlarmTrace(QStringLiteral("SaveToDB db update failed------trackId:%1 alarmId:%2 count:%3")
-					.arg(dbWriteAlarm.track_id)
+				qDebug() << "updatafailed target_id=" << dbWriteAlarm.unique_id << endl;
+				logAlarmTrace(QStringLiteral("SaveToDB db update failed------targetId:%1 alarmId:%2 count:%3")
+					.arg(dbWriteAlarm.unique_id)
 					.arg(dbWriteAlarm.alarm_id)
 					.arg(dbWriteAlarm.alarm_count));
 			}
@@ -643,12 +573,12 @@ bool TrackAlarmThread::isTrackInGroupAreaByGroupId(QPointF pt, int groupId)
 	return false;
 }
 
-void  TrackAlarmThread::updataAlarmTrackToDB(QSet<int> trackID, AlarmRule info, int type, int radarSourceId)
+void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule info, int type, int radarSourceId)
 {
 
 	m_listAlarmData.clear(); 
 
-	QList<int> listID = trackID.toList();
+	QList<qint64> listID = trackID.toList();
 	logAlarmTraceThrottled(
 		QStringLiteral("upd_batch_%1_%2").arg(info.condition_id).arg(type),
 		QStringLiteral("updataAlarmTrackToDB enter------rule:%1 conditionId:%2 trackType:%3 radarSourceId:%4 candidateCount:%5")
@@ -671,7 +601,7 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<int> trackID, AlarmRule info, 
 	}
 	for (int i = 0; i < listID.size(); i++)
 	{
-		const int candidateTrackId = listID.at(i);
+		const qint64 candidateTrackId = listID.at(i);
 		if (type <= 3)
 		{
 			SPxPacketTrackExtended track;
@@ -826,8 +756,12 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<int> trackID, AlarmRule info, 
 			bool blacklistAlarm = false; // 黑名单直接告警标志
 			bool whitelistSkip = false;  // 白名单直接忽略标志
 			QString failReason;
-			int trackId = track.norm.min.id;
+			const qint64 targetId = candidateTrackId;
 			float height = track.altitudeMetres;
+			const int filterLookupKey =
+				(targetId > 0 && targetId <= static_cast<qint64>(std::numeric_limits<int>::max()))
+					? static_cast<int>(targetId)
+					: 0;
 
 			// 免告警区：位于 NoAlarmGroupId（默认 group_id=1）内且无已发布告警则跳过；已有告警则持续
 			{
@@ -836,21 +770,21 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<int> trackID, AlarmRule info, 
 					const QPointF ptNoAlarm(track.latDegs, track.longDegs);
 					if (isTrackInGroupAreaByGroupId(ptNoAlarm, alNoAlarm.noAlarmGroupId)) {
 						const bool hasPublished = trackHasPublishedAlarm(
-							gConfig, trackId, alNoAlarm.trackAlreadyHasAlarmWindowMs);
+							gConfig, targetId, alNoAlarm.trackAlreadyHasAlarmWindowMs);
 						if (!hasPublished) {
 							logAlarmTraceThrottled(
-								QStringLiteral("upd_skip_noalarm_%1_%2").arg(trackId).arg(info.condition_id),
-								QStringLiteral("updataAlarmTrackToDB skip------trackId:%1 reason:no_alarm_group groupId:%2 conditionId:%3")
-									.arg(trackId)
+								QStringLiteral("upd_skip_noalarm_%1_%2").arg(targetId).arg(info.condition_id),
+								QStringLiteral("updataAlarmTrackToDB skip------targetId:%1 reason:no_alarm_group groupId:%2 conditionId:%3")
+									.arg(targetId)
 									.arg(alNoAlarm.noAlarmGroupId)
 									.arg(info.condition_id),
 								10000);
 							continue;
 						}
 						logAlarmTraceThrottled(
-							QStringLiteral("upd_noalarm_keep_%1").arg(trackId),
-							QStringLiteral("updataAlarmTrackToDB no_alarm_zone_keep------trackId:%1 groupId:%2 hasPublishedAlarm:1 conditionId:%3")
-								.arg(trackId)
+							QStringLiteral("upd_noalarm_keep_%1").arg(targetId),
+							QStringLiteral("updataAlarmTrackToDB no_alarm_zone_keep------targetId:%1 groupId:%2 hasPublishedAlarm:1 conditionId:%3")
+								.arg(targetId)
 								.arg(alNoAlarm.noAlarmGroupId)
 								.arg(info.condition_id),
 							30000);
@@ -859,8 +793,8 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<int> trackID, AlarmRule info, 
 			}
 
 			// 1. 最优先：黑名单和白名单判断
-			if (gConfig->m_mapTargetInfoFilter.contains(trackId)) {
-				TargetInfoFilter targetInfo = gConfig->m_mapTargetInfoFilter[trackId];
+			if (filterLookupKey > 0 && gConfig->m_mapTargetInfoFilter.contains(filterLookupKey)) {
+				TargetInfoFilter targetInfo = gConfig->m_mapTargetInfoFilter[filterLookupKey];
 
 				// 黑名单判断 - 如果启用黑名单且目标在黑名单中，直接告警，跳过所有其他条件
 				if (info.blacklist_judge == 1 && targetInfo.black_white_attr == 2) {
@@ -878,17 +812,17 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<int> trackID, AlarmRule info, 
 			if (blacklistAlarm) {
 				QPointF pt = QPointF(track.latDegs, track.longDegs);
 				Q_UNUSED(pt);
-				logAlarmTrace(QStringLiteral("updataAlarmTrackToDB pass------trackId:%1 path:blacklist conditionId:%2")
-					.arg(track.norm.min.id)
+				logAlarmTrace(QStringLiteral("updataAlarmTrackToDB pass------targetId:%1 path:blacklist conditionId:%2")
+					.arg(targetId)
 					.arg(info.condition_id));
-				SaveToDB(info, track.norm.min.id, track.secondary.uniqueID, track.latDegs, track.longDegs, track.norm.min.speedMps, track.norm.min.courseDegrees, track.norm.min.rangeMetres, type, al.defaultThreatScore, static_cast<int>(track.msgTimeSecs), radarSourceId);
+				SaveToDB(info, targetId, track.latDegs, track.longDegs, track.norm.min.speedMps, track.norm.min.courseDegrees, track.norm.min.rangeMetres, type, al.defaultThreatScore, static_cast<int>(track.msgTimeSecs), radarSourceId);
 			}
 			// 如果是白名单过滤掉的目标，直接跳过
 			else if (whitelistSkip) {
 				logAlarmTraceThrottled(
-					QStringLiteral("upd_whitelist_%1_%2").arg(trackId).arg(info.condition_id),
-					QStringLiteral("updataAlarmTrackToDB skip------trackId:%1 reason:%2 conditionId:%3")
-						.arg(trackId)
+					QStringLiteral("upd_whitelist_%1_%2").arg(targetId).arg(info.condition_id),
+					QStringLiteral("updataAlarmTrackToDB skip------targetId:%1 reason:%2 conditionId:%3")
+						.arg(targetId)
 						.arg(failReason)
 						.arg(info.condition_id),
 					10000);
@@ -901,15 +835,16 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<int> trackID, AlarmRule info, 
 				{
 					QMutexLocker locker(&gConfig->m_alarmDataMutex);
 					for (QMap<QString, AlarmData>::iterator itA = gConfig->m_mapAlarmData.begin(); itA != gConfig->m_mapAlarmData.end(); ++itA) {
-						if (itA.value().condition_id == info.condition_id && itA.value().track_id == track.norm.min.id) {
+						if (itA.value().condition_id == info.condition_id
+							&& static_cast<qint64>(itA.value().unique_id) == targetId) {
 							qint64 time_now = QDateTime::currentDateTime().toMSecsSinceEpoch();
 							qint64 time_alarm = QDateTime::fromString(itA.value().time, "yyyy-MM-dd hh:mm:ss.zzz").toMSecsSinceEpoch();
 							if (time_now - time_alarm < al.trackAlreadyHasAlarmWindowMs) {
 								trackAlreadyHasAlarm = true;
 								logAlarmTraceThrottled(
-									QStringLiteral("upd_has_alarm_%1_%2").arg(track.norm.min.id).arg(info.condition_id),
-									QStringLiteral("updataAlarmTrackToDB trackAlreadyHasAlarm------trackId:%1 conditionId:%2 alarmId:%3 ageMs:%4 windowMs:%5")
-										.arg(track.norm.min.id)
+									QStringLiteral("upd_has_alarm_%1_%2").arg(targetId).arg(info.condition_id),
+									QStringLiteral("updataAlarmTrackToDB trackAlreadyHasAlarm------targetId:%1 conditionId:%2 alarmId:%3 ageMs:%4 windowMs:%5")
+										.arg(targetId)
 										.arg(info.condition_id)
 										.arg(itA.value().alarm_id)
 										.arg(time_now - time_alarm)
@@ -932,7 +867,7 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<int> trackID, AlarmRule info, 
 						currentSpeedCheck = false; // 大于条件不满足
 					}
 
-					const int trackIdSpd = track.norm.min.id;
+					const qint64 trackIdSpd = targetId;
 
 					if (type == 0 || !al.speedDoubleCheckFuseTrackOnly) {
 						if (m_mapSpeedLastCheck.contains(trackIdSpd)) {
@@ -1162,8 +1097,8 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<int> trackID, AlarmRule info, 
 				// 4. 其他高级过滤条件
 				if (passFilter) {
 					// 4.1 从TargetInfoFilter获取基础属性信息（敌我识别、合作目标等）
-					if (gConfig->m_mapTargetInfoFilter.contains(trackId)) {
-						TargetInfoFilter targetInfo = gConfig->m_mapTargetInfoFilter[trackId];
+					if (filterLookupKey > 0 && gConfig->m_mapTargetInfoFilter.contains(filterLookupKey)) {
+						TargetInfoFilter targetInfo = gConfig->m_mapTargetInfoFilter[filterLookupKey];
 
 						// 敌我识别判断 - 使用位掩码判断
 						if (info.affiliation_judge > 0) {
@@ -1312,7 +1247,7 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<int> trackID, AlarmRule info, 
 							.arg(track.norm.min.reserved1)
 							.arg(info.condition_id),
 						10000);
-					SaveToDB(info, track.norm.min.id, track.secondary.uniqueID, track.latDegs, track.longDegs, track.norm.min.speedMps, track.norm.min.courseDegrees, track.norm.min.rangeMetres, type, lastCalculatedThreatScore, static_cast<int>(track.msgTimeSecs), radarSourceId);
+					SaveToDB(info, targetId, track.latDegs, track.longDegs, track.norm.min.speedMps, track.norm.min.courseDegrees, track.norm.min.rangeMetres, type, lastCalculatedThreatScore, static_cast<int>(track.msgTimeSecs), radarSourceId);
 				}
 				else {
 					logAlarmTraceThrottled(
@@ -1509,7 +1444,7 @@ void TrackAlarmThread::processAlarms()
 					break;
 				}
 			}
-			QSet<int> trackIdSet;//报警ID;
+			QSet<qint64> trackIdSet;//报警ID;
 			if (info.group_id >= 0 && info.area_id >= 0)
 			{
 				//qDebug() << "1=====" << endl;
@@ -1518,7 +1453,7 @@ void TrackAlarmThread::processAlarms()
 					int trackCount = 10;
 					if (info.track_type == 0)
 					{
-						QMap<int, SPxPacketTrackExtended>::iterator it = m_mapFuseTrack.begin();
+						QMap<qint64, SPxPacketTrackExtended>::iterator it = m_mapFuseTrack.begin();
 						while (it != m_mapFuseTrack.end())
 						{
 							//qDebug() << "TrackAlarmThread: processAlarms: it" << it.key();
@@ -1546,7 +1481,7 @@ void TrackAlarmThread::processAlarms()
 											}
 										}
 										if(ret)
-										trackIdSet.insert(it.value().norm.min.id);
+										trackIdSet.insert(it.key());
 									}
 										
 
@@ -1576,7 +1511,7 @@ void TrackAlarmThread::processAlarms()
 											}
 										}
 										if (ret)
-											trackIdSet.insert(it.value().norm.min.id);
+											trackIdSet.insert(it.key());
 									}
 								}
 
@@ -1599,7 +1534,7 @@ void TrackAlarmThread::processAlarms()
 											}
 										}
 										if (ret)
-											trackIdSet.insert(it.value().norm.min.id);
+											trackIdSet.insert(it.key());
 									}
 
 
@@ -1650,7 +1585,7 @@ void TrackAlarmThread::processAlarms()
 											}
 										}
 										if (ret)
-											trackIdSet.insert(it_radar.value().norm.min.id);
+											trackIdSet.insert(it_radar.key());
 									}
 									
 
@@ -1676,7 +1611,7 @@ void TrackAlarmThread::processAlarms()
 										}
 									}
 									if (ret)
-										trackIdSet.insert(it_radar.value().norm.min.id);
+										trackIdSet.insert(it_radar.key());
 
 								}
 
@@ -1699,7 +1634,7 @@ void TrackAlarmThread::processAlarms()
 											}
 										}
 										if (ret)
-											trackIdSet.insert(it_radar.value().norm.min.id);
+											trackIdSet.insert(it_radar.key());
 									}
 
 								}
@@ -1794,7 +1729,7 @@ void TrackAlarmThread::processAlarms()
 					}
 					else if (info.track_type == 3) 
 					{
-						QMap<int, SPxPacketTrackExtended>::iterator it_radar = m_mapBirdRadarTrack.begin();
+						QMap<qint64, SPxPacketTrackExtended>::iterator it_radar = m_mapBirdRadarTrack.begin();
 						//qDebug() << "TrackAlarmThread: processAlarms: it_radar size" << m_mapBirdRadarTrack.size();
 						while (it_radar != m_mapBirdRadarTrack.end())
 						{
@@ -1821,7 +1756,7 @@ void TrackAlarmThread::processAlarms()
 									{
 										//qDebug() << "TrackAlarmThread: processAlarms: it_radar key" << it_radar.key();
 										const SPxPacketTrackExtended& birdTr = it_radar.value();
-										trackIdSet.insert(birdTr.norm.min.id);
+										trackIdSet.insert(it_radar.key());
 										logBirdAreaCandidate(it_radar.key(), birdTr, info.condition_id);
 									}
 
@@ -1839,7 +1774,7 @@ void TrackAlarmThread::processAlarms()
 
 									if (m_mapBirdRadarTrail[it_radar.key()].size() > trailCount&&(height>=info.height_min || height<=info.height_max)) {
 										const SPxPacketTrackExtended& birdTr = it_radar.value();
-										trackIdSet.insert(birdTr.norm.min.id);
+										trackIdSet.insert(it_radar.key());
 										logBirdAreaCandidate(it_radar.key(), birdTr, info.condition_id);
 									}
 
@@ -1853,7 +1788,7 @@ void TrackAlarmThread::processAlarms()
 								{
 									if (m_mapBirdRadarTrail[it_radar.key()].size() > trailCount && (height>info.height_min || height<info.height_max)) {
 										const SPxPacketTrackExtended& birdTr = it_radar.value();
-										trackIdSet.insert(birdTr.norm.min.id);
+										trackIdSet.insert(it_radar.key());
 										logBirdAreaCandidate(it_radar.key(), birdTr, info.condition_id);
 									}
 
@@ -1872,7 +1807,7 @@ void TrackAlarmThread::processAlarms()
 					}
 					else if (info.track_type == 4)
 					{
-						QMap<int, SPxPacketTrackExtended>::iterator it_radar = m_mapBirdRadarTrack.begin();
+						QMap<qint64, SPxPacketTrackExtended>::iterator it_radar = m_mapBirdRadarTrack.begin();
 						while (it_radar != m_mapBirdRadarTrack.end())
 						{
 
@@ -1906,7 +1841,7 @@ void TrackAlarmThread::processAlarms()
 													}
 												}
 												if (ret)
-													trackIdSet.insert(it_radar.value().norm.min.id);
+													trackIdSet.insert(it_radar.key());
 											}
 										}
 									}
@@ -1936,7 +1871,7 @@ void TrackAlarmThread::processAlarms()
 												}
 											}
 											if (ret)
-												trackIdSet.insert(it_radar.value().norm.min.id);
+												trackIdSet.insert(it_radar.key());
 										}
 									}
 
@@ -1963,7 +1898,7 @@ void TrackAlarmThread::processAlarms()
 												}
 											}
 											if (ret)
-												trackIdSet.insert(it_radar.value().norm.min.id);
+												trackIdSet.insert(it_radar.key());
 										}
 									}
 								}
@@ -1984,7 +1919,7 @@ void TrackAlarmThread::processAlarms()
 				
 				if (info.track_type == 0)
 				{
-					QMap<int, QList<QPointF>>::iterator it = m_mapFuseTrail.begin();
+					QMap<qint64, QList<QPointF>>::iterator it = m_mapFuseTrail.begin();
 					while (it != m_mapFuseTrail.end())
 					{
 						if (it.value().size() == 0)
@@ -2078,7 +2013,7 @@ void TrackAlarmThread::processAlarms()
 					}
 					trackIdSet.clear();
 					info.isBirdTrack = 1;
-					QMap<int, SPxPacketTrackExtended>::iterator it_radar = m_mapBirdRadarTrack.begin();
+					QMap<qint64, SPxPacketTrackExtended>::iterator it_radar = m_mapBirdRadarTrack.begin();
 					while (it_radar != m_mapBirdRadarTrack.end())
 					{
 
@@ -2368,7 +2303,7 @@ void TrackAlarmThread::processAlarms()
 				{
 					if (info.track_type == 0)
 					{
-						QMap<int, QList<QPointF>>::iterator it = m_mapFuseTrail.begin();
+						QMap<qint64, QList<QPointF>>::iterator it = m_mapFuseTrail.begin();
 						while (it != m_mapFuseTrail.end())
 						{
 							QPointF pt = it.value().at(0);
@@ -2657,7 +2592,7 @@ void TrackAlarmThread::processAlarms()
 				{
 					if (info.track_type == 0)
 					{
-						QMap<int, SPxPacketTrackExtended>::iterator it = m_mapFuseTrack.begin();
+						QMap<qint64, SPxPacketTrackExtended>::iterator it = m_mapFuseTrack.begin();
 						while (it != m_mapFuseTrack.end())
 						{
 							QPointF pt = QPointF(it.value().latDegs, it.value().longDegs);
@@ -2716,7 +2651,7 @@ void TrackAlarmThread::processAlarms()
 										if (range < 1852)
 										{
 											if (m_mapFuseTrail[it.key()].size() > trailCount)
-											trackIdSet.insert(it.value().norm.min.id);
+											trackIdSet.insert(it.key());
 
 											break;
 										}
@@ -2736,7 +2671,7 @@ void TrackAlarmThread::processAlarms()
 								{
 
 									if (m_mapFuseTrail[it.key()].size() > trailCount)
-									trackIdSet.insert(it.value().norm.min.id);
+									trackIdSet.insert(it.key());
 
 								}
 
@@ -2792,7 +2727,7 @@ void TrackAlarmThread::processAlarms()
 										if (range < 1852)
 										{
 											if (m_mapFuseTrail[it.key()].size() > trailCount)
-											trackIdSet.insert(it.value().norm.min.id);
+											trackIdSet.insert(it.key());
 
 											break;
 										}
@@ -2869,7 +2804,7 @@ void TrackAlarmThread::processAlarms()
 										if (range < 1852)
 										{
 											if (m_mapRadarTrail[it.key()].size() > trailCount)
-											trackIdSet.insert(it.value().norm.min.id);
+											trackIdSet.insert(it.key());
 
 											break;
 										}
@@ -2889,7 +2824,7 @@ void TrackAlarmThread::processAlarms()
 								{
 
 									if (m_mapRadarTrail[it.key()].size() > trailCount)
-									trackIdSet.insert(it.value().norm.min.id);
+									trackIdSet.insert(it.key());
 
 
 								}
@@ -2947,7 +2882,7 @@ void TrackAlarmThread::processAlarms()
 										{
 											//qDebug() << "trackID=" << it.key() << "dis=" << dis << endl;
 											if (m_mapRadarTrail[it.key()].size() > trailCount)
-											trackIdSet.insert(it.value().norm.min.id);
+											trackIdSet.insert(it.key());
 
 											break;
 										}
@@ -3123,7 +3058,7 @@ void TrackAlarmThread::processAlarms()
 				{
 					if (info.track_type == 0)
 					{
-						QMap<int, SPxPacketTrackExtended>::iterator it = m_mapFuseTrack.begin();
+						QMap<qint64, SPxPacketTrackExtended>::iterator it = m_mapFuseTrack.begin();
 						while (it != m_mapFuseTrack.end())
 						{
 
@@ -3191,7 +3126,7 @@ void TrackAlarmThread::processAlarms()
 				{
 					if (info.track_type == 0)
 					{
-						QMap<int, SPxPacketTrackExtended>::iterator it = m_mapFuseTrack.begin();
+						QMap<qint64, SPxPacketTrackExtended>::iterator it = m_mapFuseTrack.begin();
 						while (it != m_mapFuseTrack.end())
 						{
 
@@ -3260,7 +3195,7 @@ void TrackAlarmThread::processAlarms()
 				{
 					if (info.track_type == 0)
 					{
-						QMap<int, QList<QPointF>>::iterator it = m_mapFuseTrail.begin();
+						QMap<qint64, QList<QPointF>>::iterator it = m_mapFuseTrail.begin();
 						while (it != m_mapFuseTrail.end())
 						{
 							if (it.value().size() < 2)
@@ -3458,7 +3393,7 @@ void TrackAlarmThread::processAlarms()
 				{
 					if (info.track_type == 0)
 					{
-						QMap<int, QList<QPointF>>::iterator it = m_mapFuseTrail.begin();
+						QMap<qint64, QList<QPointF>>::iterator it = m_mapFuseTrail.begin();
 						while (it != m_mapFuseTrail.end())
 						{
 							QPointF pt = it.value().at(0);
@@ -3669,7 +3604,10 @@ void TrackAlarmThread::processAlarms()
 					else if (info.track_type == 1)
 					{
 
-						trackIdSet = m_mapRadarTrack.keys().toSet();
+						trackIdSet.clear();
+						for (int k : m_mapRadarTrack.keys()) {
+							trackIdSet.insert(static_cast<qint64>(k));
+						}
 						if (trackIdSet.size() > 0)
 						{
 							updataAlarmTrackToDB(trackIdSet, info, 1);
@@ -3680,7 +3618,10 @@ void TrackAlarmThread::processAlarms()
 					else if (info.track_type == 2)
 					{
 
-						trackIdSet = m_mapAISTrack.keys().toSet();
+						trackIdSet.clear();
+						for (int k : m_mapAISTrack.keys()) {
+							trackIdSet.insert(static_cast<qint64>(k));
+						}
 						if (trackIdSet.size() > 0)
 						{
 							updataAlarmTrackToDB(trackIdSet, info, 2);
@@ -3700,7 +3641,7 @@ void TrackAlarmThread::processAlarms()
 				{
 					if (info.track_type == 0)
 					{
-						QMap<int, SPxPacketTrackExtended>::iterator it = m_mapFuseTrack.begin();
+						QMap<qint64, SPxPacketTrackExtended>::iterator it = m_mapFuseTrack.begin();
 						while (it != m_mapFuseTrack.end())
 						{
 
@@ -3714,7 +3655,7 @@ void TrackAlarmThread::processAlarms()
 								if (dis <= radius)
 								{
 									if (m_mapFuseTrail[it.key()].size() > trailCount)
-									trackIdSet.insert(it.value().norm.min.id);
+									trackIdSet.insert(it.key());
 								}
 							}
 							else
@@ -3722,7 +3663,7 @@ void TrackAlarmThread::processAlarms()
 								if (dis > radius)
 								{
 									if (m_mapFuseTrail[it.key()].size() > trailCount)
-									trackIdSet.insert(it.value().norm.min.id);
+									trackIdSet.insert(it.key());
 								}
 							}
 							it++;
@@ -3749,7 +3690,7 @@ void TrackAlarmThread::processAlarms()
 								if (dis <= radius)
 								{
 									if (m_mapRadarTrail[it_radar.key()].size() > trailCount)
-									trackIdSet.insert(it_radar.value().norm.min.id);
+									trackIdSet.insert(it_radar.key());
 								}
 							}
 							else
@@ -3757,7 +3698,7 @@ void TrackAlarmThread::processAlarms()
 								if (dis > radius)
 								{
 									if (m_mapRadarTrail[it_radar.key()].size() > trailCount)
-									trackIdSet.insert(it_radar.value().norm.min.id);
+									trackIdSet.insert(it_radar.key());
 								}
 							}
 
@@ -3811,7 +3752,7 @@ void TrackAlarmThread::processAlarms()
 				{
 					if (info.track_type == 0)
 					{
-						QMap<int, QList<QPointF>>::iterator it = m_mapFuseTrail.begin();
+						QMap<qint64, QList<QPointF>>::iterator it = m_mapFuseTrail.begin();
 						while (it != m_mapFuseTrail.end())
 						{
 							QPointF pt = it.value().at(0);
@@ -4017,7 +3958,7 @@ void TrackAlarmThread::processAlarms()
 				{
 					if (info.track_type == 0)
 					{
-						QMap<int, SPxPacketTrackExtended>::iterator it = m_mapFuseTrack.begin();
+						QMap<qint64, SPxPacketTrackExtended>::iterator it = m_mapFuseTrack.begin();
 						while (it != m_mapFuseTrack.end())
 						{
 
@@ -4031,7 +3972,7 @@ void TrackAlarmThread::processAlarms()
 								if (dis <= radius + 1852 && dis > radius)
 								{
 									if (m_mapFuseTrail[it.key()].size() > trailCount)
-									trackIdSet.insert(it.value().norm.min.id);
+									trackIdSet.insert(it.key());
 								}
 							}
 							else
@@ -4039,7 +3980,7 @@ void TrackAlarmThread::processAlarms()
 								if (dis <= radius && dis > radius - 1852)
 								{
 									if (m_mapFuseTrail[it.key()].size() > trailCount)
-									trackIdSet.insert(it.value().norm.min.id);
+									trackIdSet.insert(it.key());
 								}
 							}
 							it++;
@@ -4066,7 +4007,7 @@ void TrackAlarmThread::processAlarms()
 								if (dis <= radius + 1852 && dis > radius)
 								{
 									if (m_mapRadarTrail[it_radar.key()].size() > trailCount)
-									trackIdSet.insert(it_radar.value().norm.min.id);
+									trackIdSet.insert(it_radar.key());
 								}
 							}
 							else
@@ -4074,7 +4015,7 @@ void TrackAlarmThread::processAlarms()
 								if (dis <= radius && dis > radius - 1852)
 								{
 									if (m_mapRadarTrail[it_radar.key()].size() > trailCount)
-									trackIdSet.insert(it_radar.value().norm.min.id);
+									trackIdSet.insert(it_radar.key());
 								}
 							}
 

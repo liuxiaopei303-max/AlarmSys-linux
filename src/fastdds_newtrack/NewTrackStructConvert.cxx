@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 #include <QDateTime>
 
@@ -21,7 +22,6 @@ const TargetFull::RadarObservedTargetProfile* findRadarProfile(const TargetFull:
     return nullptr;
 }
 
-/** 自报位：sources[].radar_source.target_profile.fusionSources 中 dataSourceId==zibaowei 的 trackId */
 uint32_t zibaoweiTrackIdFromFusionSources(const TargetFull::TargetObject& t)
 {
     for (const TargetFull::TargetSourceItem& src : t.sources()) {
@@ -89,64 +89,6 @@ double courseFromEnu(double e, double n)
     return deg;
 }
 
-bool parseUint(const std::string& s, uint32_t& out)
-{
-    if (s.empty()) {
-        return false;
-    }
-    try {
-        size_t pos = 0;
-        const unsigned long v = std::stoul(s, &pos, 10);
-        if (pos != s.size()) {
-            return false;
-        }
-        out = static_cast<uint32_t>(v);
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-/** 稳定唯一号阈值：小于此值的 radar.unique_id 多为自报位/fusion id，不能当 uniqueID */
-constexpr uint32_t kStableUniqueIdThreshold = 100000U;
-
-bool isLikelyFusionOrDisplayId(uint32_t id, uint32_t zibaoweiId)
-{
-    if (id == 0U) {
-        return true;
-    }
-    if (zibaoweiId != 0U && id == zibaoweiId) {
-        return true;
-    }
-    return id < kStableUniqueIdThreshold;
-}
-
-uint32_t resolveSecondaryUniqueId(const TargetFull::TargetObject& t,
-                                  const TargetFull::RadarObservedTargetProfile* r)
-{
-    uint32_t fromTargetId = 0U;
-    const bool hasTargetId = parseUint(t.target_id(), fromTargetId) && fromTargetId != 0U;
-    const uint32_t zibaoweiId = zibaoweiTrackIdFromFusionSources(t);
-
-    if (hasTargetId && fromTargetId >= kStableUniqueIdThreshold) {
-        return fromTargetId;
-    }
-
-    if (r != nullptr && r->unique_id() != 0UL) {
-        const uint32_t radarUnique = static_cast<uint32_t>(r->unique_id());
-        if (!isLikelyFusionOrDisplayId(radarUnique, zibaoweiId)) {
-            return radarUnique;
-        }
-    }
-
-    // 小号 target_id 多为自报位/fusion id，不能作为 uniqueID
-    if (hasTargetId && !isLikelyFusionOrDisplayId(fromTargetId, zibaoweiId)) {
-        return fromTargetId;
-    }
-
-    return 0U;
-}
-
 uint32_t threatScoreFromPriority(const TargetFull::TargetObject& t)
 {
     const auto& th = t.priority().threat();
@@ -168,10 +110,27 @@ uint32_t threatScoreFromPriority(const TargetFull::TargetObject& t)
 
 } // namespace
 
+bool parseTargetId(const TargetFull::TargetObject& t, qint64* outTargetId)
+{
+    if (outTargetId == nullptr) {
+        return false;
+    }
+    const QString s = QString::fromStdString(t.target_id()).trimmed();
+    if (s.isEmpty()) {
+        return false;
+    }
+    bool ok = false;
+    const qint64 v = s.toLongLong(&ok);
+    if (!ok || v <= 0) {
+        return false;
+    }
+    *outTargetId = v;
+    return true;
+}
+
 uint32_t preserveStableUniqueId(uint32_t previous, uint32_t incoming)
 {
-    constexpr uint32_t threshold = 100000U;
-    if (previous >= threshold && incoming < threshold) {
+    if (previous != 0U && incoming == 0U) {
         return previous;
     }
     return incoming;
@@ -186,55 +145,26 @@ void applyAirTargetReserved1(const TargetFull::TargetObject& t, SPxPacketTrackEx
     }
 }
 
-int resolveFuseMapKey(const TargetFull::TargetObject& t, int alarmLogicMode, bool birdTopic)
+int resolveFuseMapKey(const TargetFull::TargetObject& t, int /*alarmLogicMode*/, bool /*birdTopic*/)
 {
-    uint32_t targetId = 0U;
-    const bool hasTargetId = parseUint(t.target_id(), targetId);
-
-    if (alarmLogicMode == 1) {
-        return hasTargetId ? static_cast<int>(targetId) : -1;
-    }
-
-    const TargetFull::RadarObservedTargetProfile* r = findRadarProfile(t);
-    const uint32_t radarId = (r != nullptr) ? static_cast<uint32_t>(r->track_id()) : 0U;
-
-    uint32_t extId = 0U;
-    const bool hasExtId = parseUint(t.external_target_id(), extId);
-    if (birdTopic) {
-        // 鸟情：与 Mode0 相同优先级，但不限制 <10000（支持界面显示号如 43420）
-        if (hasExtId && extId != 0U) {
-            return static_cast<int>(extId);
-        }
-        if (radarId != 0U) {
-            return static_cast<int>(radarId);
-        }
-        if (hasTargetId && targetId != 0U) {
-            return static_cast<int>(targetId);
-        }
+    qint64 targetId = 0;
+    if (!parseTargetId(t, &targetId)) {
         return -1;
     }
-
-    // fuse topic：external_id 不限制 <10000（对海大号线如 41414）
-    if (hasExtId && extId != 0U) {
-        return static_cast<int>(extId);
+    if (targetId > static_cast<qint64>(std::numeric_limits<int>::max())) {
+        return -1;
     }
-    if (radarId != 0U && radarId < 10000U) {
-        return static_cast<int>(radarId);
-    }
-    if (hasTargetId && targetId < 10000U) {
-        return static_cast<int>(targetId);
-    }
-    return -1;
+    return static_cast<int>(targetId);
 }
 
 bool targetToSpxExtended(
     const TargetFull::TargetObject& t,
-    int alarmLogicMode,
+    int /*alarmLogicMode*/,
     SPxPacketTrackExtended& out,
-    bool birdTopic)
+    bool /*birdTopic*/)
 {
-    const int mapKey = resolveFuseMapKey(t, alarmLogicMode, birdTopic);
-    if (mapKey < 0) {
+    qint64 targetId = 0;
+    if (!parseTargetId(t, &targetId)) {
         return false;
     }
 
@@ -244,12 +174,10 @@ bool targetToSpxExtended(
     const auto& kin = t.target_kinematics();
     const auto& pos = kin.position();
 
-    // 位置：① kinematics.position ② radar.lat/long
     out.latDegs = static_cast<float>(pickFirstNonZero(pos.latitude(), r ? r->latDegs() : 0.0));
     out.longDegs = static_cast<float>(pickFirstNonZero(pos.longitude(), r ? r->longDegs() : 0.0));
     out.altitudeMetres = static_cast<float>(pickFirstNonZero(pos.altitude(), r ? r->altitudeMetres() : 0.0));
 
-    // 距离/方位：① fused_* ② radar
     out.norm.min.rangeMetres = static_cast<float>(pickFirstNonZero(
         t.fused_range_m(), r ? r->range_m() : 0.0));
     out.norm.min.azimuthDegrees = static_cast<float>(pickFirstNonZero(
@@ -257,7 +185,6 @@ bool targetToSpxExtended(
 
     out.norm.min.speedMps = static_cast<float>(kin.speed());
 
-    // 航向：① target_orientation.yaw ② atan2(velocity_enu)
     const double yaw = kin.target_orientation().yaw();
     out.norm.min.courseDegrees = static_cast<float>(pickFirstNonZero(
         yaw, courseFromEnu(kin.velocity_enu().e(), kin.velocity_enu().n())));
@@ -271,16 +198,16 @@ bool targetToSpxExtended(
     out.msgTimeSecs = static_cast<uint32_t>(QDateTime::currentDateTime().toSecsSinceEpoch());
     out.msgTimeUsecs = 0;
 
-    const uint32_t resolvedUniqueId = resolveSecondaryUniqueId(t, r);
-    out.secondary.uniqueID = resolvedUniqueId;
+    out.norm.min.id = 0;
+    if (targetId <= static_cast<qint64>(std::numeric_limits<uint32_t>::max())) {
+        out.secondary.uniqueID = static_cast<uint32_t>(targetId);
+    } else {
+        out.secondary.uniqueID = static_cast<uint32_t>(targetId & 0xFFFFFFFFULL);
+    }
 
     out.norm.reserved3 = static_cast<uint32_t>(threatScoreFromPriority(t));
 
-    out.norm.min.id = static_cast<uint32_t>(mapKey);
-
-    // fusion.trackID：sources[].radar.fusionSources；trackID[0] 优先 zibaowei（自报位）
     fillFusionTrackIds(t, out);
-
     applyAirTargetReserved1(t, out);
 
     return true;
@@ -289,7 +216,6 @@ bool targetToSpxExtended(
 void applyBirdFuseExtras(const TargetFull::TargetObject& t, SPxPacketTrackExtended& track)
 {
     applyAirTargetReserved1(t, track);
-
     fillFusionTrackIds(t, track);
 }
 

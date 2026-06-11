@@ -30,6 +30,7 @@ int main(int argc, char* argv[])
     }
 
     cfg->InitFastdds();
+    cfg->startAlarmDestroyGrpcSubscriber();
 
     TrackAlarmThread* alarmThread = new TrackAlarmThread(1);
     alarmThread->start();
@@ -47,6 +48,7 @@ int main(int argc, char* argv[])
     alarmThread->wait(5000);
     delete alarmThread;
 
+    cfg->stopAlarmDestroyGrpcSubscriber();
     cfg->DestoryFastdds();
     DatabaseManager::getInstance().cleanup();
 

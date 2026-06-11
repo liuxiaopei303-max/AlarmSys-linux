@@ -25,6 +25,7 @@
 #include "fastdds_track/TrackClassSubscriberApp.hpp"
 
 class AlarmGrpcSnapshotClient;
+class AlarmGrpcDestroySubscriber;
 
 class FastddsMsgPublisherApp;
 class FastddsRecognitionPublisherApp;
@@ -290,8 +291,8 @@ public:
     QStringList m_listHistoryTbl;  //采集-历史任务
     QMap<int, SPxPacketTrackExtended> m_mapRadarTrack;
     QMap<int, SPxPacketTrackExtended> m_mapMillRadarTrack;
-    QMap<int, SPxPacketTrackExtended> m_mapFuseTrack;
-    QMap<int, SPxPacketTrackExtended> m_mapBirdFuseTrack;
+    QMap<qint64, SPxPacketTrackExtended> m_mapFuseTrack;
+    QMap<qint64, SPxPacketTrackExtended> m_mapBirdFuseTrack;
     QMap<int, SPxPacketTrackExtended> m_mapBirdRadarTrack;
     QMap<int, TrackName> m_mapTrackName;
     bool m_isSelect = false;
@@ -330,7 +331,7 @@ public:
     QMap<QString, QString> m_mapAlarmDescription; //告警详细信息
     QMutex m_alarmDataMutex;
     QMutex m_alarmFilterMutex;
-    QList<QPair<int, int>> m_listAlarmFilter; // (type, trackid) type: 0-对海 1-对空，收到 api/alarm_filter 后不发送该 trackid 的对应类型告警
+    QList<QPair<int, qint64>> m_listAlarmFilter; // (type, target_id) type: 0-对海 1-对空
     QMutex m_vTargetPicMutex;
     bool m_useCheckAlarmCamera = false;
     bool m_useCameraCheckTrack = false;
@@ -344,8 +345,8 @@ public:
     MyMarkerArray m_markerArray;  //激光雷达结构体
     QMap<int, AISTrack> m_mapAISTrack;
 
-    QMap<int, QList<QPointF>>m_mapFuseTrail;
-    QMap<int, QList<QPointF>>m_mapBirdFuseTrail;
+    QMap<qint64, QList<QPointF>> m_mapFuseTrail;
+    QMap<qint64, QList<QPointF>> m_mapBirdFuseTrail;
     QMap<int, QList<QPointF>>m_mapRadarTrail;
     QMap<int, QList<QPointF>>m_mapAISTrail;
     QMap<int, QList<QPointF>>m_mapBirdRadarTrail;
@@ -393,6 +394,7 @@ public:
     FastddsRecognitionPublisherApp* m_recognitionPublisher = nullptr;
 
     std::unique_ptr<AlarmGrpcSnapshotClient> m_alarmGrpcClient;
+    std::unique_ptr<AlarmGrpcDestroySubscriber> m_alarmDestroyGrpcSubscriber;
     qint64 m_lastAlarmGrpcPushMs = 0;
 
     //告警条件列表
@@ -437,11 +439,14 @@ public:
     void SendAllAlarmEventMsg();
     /** 有告警时每 1s 向 TrackManager 推送 gRPC 告警快照（UpdateAlarmSnapshot） */
     void tickAlarmGrpcSnapshot();
+    /** 启动/停止 destroy gRPC 订阅（灭告警，等同 HTTP /api/alarm_filter） */
+    void startAlarmDestroyGrpcSubscriber();
+    void stopAlarmDestroyGrpcSubscriber();
     void SendNewTrackStructAlarmMsg(const AlarmEvent* alarmEvent = nullptr);
     /** true：完整组装并发布（SendAllAlarmEventMsg 全逻辑）；false：仅向 DDS 发空 AlarmEvent，不做全量告警组装 */
     bool alarmEventPushFullEnabled() const;
     void setAlarmEventPushFullEnabled(bool on);
-    void addAlarmFilter(int type, int trackid); // type: 0-对海 1-对空
+    void addAlarmFilter(int type, qint64 targetId); // type: 0-对海 1-对空，target_id 为 NewTrack DDS 全局 ID
     /** 人工确认告警：按 unique_id 标记，后续 SendAllAlarmEventMsg 直接 VERIFY_SUCCESS */
     bool confirmAlarmByUniqueId(qint64 uniqueId, QString* outMessage = nullptr);
     /** 规则告警：task_status + 鉴定/人工确认升级（DDS 与 gRPC 共用） */

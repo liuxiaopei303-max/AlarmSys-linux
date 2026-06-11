@@ -151,9 +151,9 @@ void clearStaleTrackMaps()
     const QDateTime curTime = QDateTime::currentDateTime();
     QWriteLocker wl(&cfg->m_trackDataLock);
 
-    auto pruneMap = [&](QMap<int, SPxPacketTrackExtended>& trackMap, int staleSecs) {
-        const QList<int> keys = trackMap.keys();
-        for (int key : keys) {
+    auto pruneMapQint64 = [&](QMap<qint64, SPxPacketTrackExtended>& trackMap, int staleSecs) {
+        const QList<qint64> keys = trackMap.keys();
+        for (qint64 key : keys) {
             if (!trackMap.contains(key)) {
                 continue;
             }
@@ -165,8 +165,8 @@ void clearStaleTrackMaps()
         }
     };
 
-    pruneMap(cfg->m_mapFuseTrack, 8);
-    pruneMap(cfg->m_mapBirdFuseTrack, 4);
+    pruneMapQint64(cfg->m_mapFuseTrack, 8);
+    pruneMapQint64(cfg->m_mapBirdFuseTrack, 4);
 }
 
 void appendTrailPoint(QList<QPointF>& trail, const SPxPacketTrackExtended& track, int maxPoints)
@@ -197,21 +197,21 @@ void applyTargetOutputSet(const TargetFull::TargetOutputSet& sample, bool isBird
             continue;
         }
 
-        const int trackid = static_cast<int>(track.norm.min.id);
-        if (trackid < 0) {
+        qint64 targetId = 0;
+        if (!NewTrackStructConvert::parseTargetId(t, &targetId) || targetId <= 0) {
             continue;
         }
 
         if (isBirdTopic) {
             NewTrackStructConvert::applyBirdFuseExtras(t, track);
             uint32_t prevUnique = 0U;
-            if (cfg->m_mapBirdFuseTrack.contains(trackid)) {
-                prevUnique = cfg->m_mapBirdFuseTrack.value(trackid).secondary.uniqueID;
+            if (cfg->m_mapBirdFuseTrack.contains(targetId)) {
+                prevUnique = cfg->m_mapBirdFuseTrack.value(targetId).secondary.uniqueID;
                 track.secondary.uniqueID =
                     NewTrackStructConvert::preserveStableUniqueId(prevUnique, track.secondary.uniqueID);
             }
-            cfg->m_mapBirdFuseTrack.insert(trackid, track);
-            appendTrailPoint(cfg->m_mapBirdFuseTrail[trackid], track, 10);
+            cfg->m_mapBirdFuseTrack.insert(targetId, track);
+            appendTrailPoint(cfg->m_mapBirdFuseTrail[targetId], track, 10);
 
             int fusionSourceCount = 0;
             for (const TargetFull::TargetSourceItem& src : t.sources()) {
@@ -226,32 +226,31 @@ void applyTargetOutputSet(const TargetFull::TargetOutputSet& sample, bool isBird
             if (fusionTid0 == 0 || inSkipList) {
                 AlarmFileLogger::logNewAlarmTrack(
                     QStringLiteral("BirdDDS ingest------mapKey:%1 target_id:%2 external_id:%3 fusionTid0:%4 fusionSourceCount:%5 inSkipList:%6 reserved1:%7")
-                        .arg(trackid)
+                        .arg(targetId)
                         .arg(QString::fromStdString(t.target_id()))
                         .arg(QString::fromStdString(t.external_target_id()))
                         .arg(fusionTid0)
                         .arg(fusionSourceCount)
                         .arg(inSkipList ? 1 : 0)
                         .arg(track.norm.min.reserved1));
-            } else if (track.secondary.uniqueID < 100000U
-                       || track.secondary.uniqueID != prevUnique) {
+            } else if (track.secondary.uniqueID != prevUnique) {
                 AlarmFileLogger::logNewAlarmTrack(
                     QStringLiteral("BirdDDS fusion------mapKey:%1 target_id:%2 uniqueID:%3 prevUnique:%4 fusionTid0:%5")
-                        .arg(trackid)
+                        .arg(targetId)
                         .arg(QString::fromStdString(t.target_id()))
                         .arg(track.secondary.uniqueID)
                         .arg(prevUnique)
                         .arg(fusionTid0));
             }
         } else {
-            if (cfg->m_mapFuseTrack.contains(trackid)) {
-                const uint32_t prevUnique = cfg->m_mapFuseTrack.value(trackid).secondary.uniqueID;
+            if (cfg->m_mapFuseTrack.contains(targetId)) {
+                const uint32_t prevUnique = cfg->m_mapFuseTrack.value(targetId).secondary.uniqueID;
                 track.secondary.uniqueID =
                     NewTrackStructConvert::preserveStableUniqueId(prevUnique, track.secondary.uniqueID);
             }
-            cfg->m_mapFuseTrack.insert(trackid, track);
+            cfg->m_mapFuseTrack.insert(targetId, track);
             const int trailMax = (fuseMode == 1) ? 15 : 10;
-            appendTrailPoint(cfg->m_mapFuseTrail[trackid], track, trailMax);
+            appendTrailPoint(cfg->m_mapFuseTrail[targetId], track, trailMax);
         }
     }
 }

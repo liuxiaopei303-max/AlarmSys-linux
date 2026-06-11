@@ -25,6 +25,7 @@ set(ALARM_SRC_DIR "${CMAKE_SOURCE_DIR}/src")
 set(SPX_INCLUDES "${CMAKE_SOURCE_DIR}/third_party/spx/Includes")
 set(NEWTRACK_STRUCT_DIR "${CMAKE_SOURCE_DIR}/third_party/NewTrackStruct")
 set(GRPC_ALARM_GEN_DIR "${CMAKE_SOURCE_DIR}/third_party/grpc_alarm/generated")
+set(GRPC_DESTROY_GEN_DIR "${CMAKE_SOURCE_DIR}/third_party/grpc_destroy/generated")
 set(GRPC_ROOT "/home/inspur/anaconda3" CACHE PATH "gRPC/protobuf install prefix")
 
 set(ALARM_SOURCES
@@ -59,6 +60,10 @@ set(GRPC_ALARM_GEN_SRC
     "${GRPC_ALARM_GEN_DIR}/alarm_service.pb.cc"
     "${GRPC_ALARM_GEN_DIR}/alarm_service.grpc.pb.cc")
 
+set(GRPC_DESTROY_GEN_SRC
+    "${GRPC_DESTROY_GEN_DIR}/destroy.pb.cc"
+    "${GRPC_DESTROY_GEN_DIR}/destroy.grpc.pb.cc")
+
 set(NEWTRACK_STRUCT_GEN_SRC
     "${NEWTRACK_STRUCT_DIR}/NewTrackRealTimeStatusPubSubTypes.cxx"
     "${NEWTRACK_STRUCT_DIR}/NewTrackRealTimeStatusTypeObjectSupport.cxx")
@@ -70,6 +75,7 @@ add_executable(alarmsys
     ${ALARM_DDS_NEWTRACK_SRC}
     ${ALARM_GRPC_SRC}
     ${GRPC_ALARM_GEN_SRC}
+    ${GRPC_DESTROY_GEN_SRC}
     ${NEWTRACK_STRUCT_GEN_SRC})
 
 target_include_directories(alarmsys PRIVATE
@@ -77,6 +83,7 @@ target_include_directories(alarmsys PRIVATE
     "${SPX_INCLUDES}"
     "${NEWTRACK_STRUCT_DIR}"
     "${GRPC_ALARM_GEN_DIR}"
+    "${GRPC_DESTROY_GEN_DIR}"
     "${FASTDDS_ROOT}/include"
     "${GRPC_ROOT}/include"
 )

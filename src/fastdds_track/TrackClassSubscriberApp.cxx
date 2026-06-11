@@ -479,10 +479,10 @@ void TrackClassSubscriberApp::slotClearTrack()
 
     //FuseTrack
     auto& fuseTrackMap = ((CustomConfig*)gConfig)->m_mapFuseTrack;
-    QList<int> allFuseKeys = fuseTrackMap.keys(); 
+    QList<qint64> allFuseKeys = fuseTrackMap.keys(); 
     int fuseRemovedCount = 0;
 
-    for (int key : allFuseKeys)
+    for (qint64 key : allFuseKeys)
     {
         if (fuseTrackMap.contains(key))
         {
@@ -505,10 +505,10 @@ void TrackClassSubscriberApp::slotClearTrack()
 
     //FuseTrack
     auto& birdfuseTrackMap = ((CustomConfig*)gConfig)->m_mapBirdFuseTrack;
-    QList<int> allBirdFuseKeys = birdfuseTrackMap.keys();
+    QList<qint64> allBirdFuseKeys = birdfuseTrackMap.keys();
     int birdfuseRemovedCount = 0;
 
-    for (int key : allBirdFuseKeys)
+    for (qint64 key : allBirdFuseKeys)
     {
         if (birdfuseTrackMap.contains(key))
         {

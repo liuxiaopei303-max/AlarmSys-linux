@@ -119,9 +119,9 @@ bool AlarmHttpServer::start(quint16 port)
                 }
 
                 bool okType = false;
-                bool okTrack = false;
+                bool okTarget = false;
                 int type = -1;
-                int trackid = -1;
+                qint64 targetId = -1;
                 const QJsonValue typeVal = spec.value(QStringLiteral("type"));
                 const QJsonValue idVal = spec.value(QStringLiteral("id"));
                 if (typeVal.isDouble()) {
@@ -131,17 +131,18 @@ bool AlarmHttpServer::start(quint16 port)
                     type = typeVal.toString().toInt(&okType);
                 }
                 if (idVal.isDouble()) {
-                    trackid = idVal.toInt();
-                    okTrack = true;
+                    targetId = static_cast<qint64>(idVal.toDouble());
+                    okTarget = targetId > 0;
                 } else if (idVal.isString()) {
-                    trackid = idVal.toString().toInt(&okTrack);
+                    targetId = idVal.toString().trimmed().toLongLong(&okTarget);
+                    okTarget = okTarget && targetId > 0;
                 }
 
-                if (okType && okTrack && type >= 0 && type <= 1 && trackid > 0) {
+                if (okType && okTarget && type >= 0 && type <= 1 && targetId > 0) {
                     if (m_cfg) {
-                        m_cfg->addAlarmFilter(type, trackid);
+                        m_cfg->addAlarmFilter(type, targetId);
                     }
-                    qInfo() << "alarm_filter POST type=" << type << "trackid=" << trackid;
+                    qInfo() << "alarm_filter POST type=" << type << "target_id=" << targetId;
                     QJsonObject resp;
                     resp[QStringLiteral("code")] = 0;
                     resp[QStringLiteral("message")] = QStringLiteral("ok");

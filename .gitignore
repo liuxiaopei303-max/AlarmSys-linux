@@ -1,5 +1,6 @@
 build/
 .git/
+git地址和token
 
 # 编译产物与运行日志
 bin/alarmsys

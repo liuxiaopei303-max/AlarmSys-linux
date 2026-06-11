@@ -1,5 +1,6 @@
 #include "customconfig.h"
 #include "grpc_alarm/AlarmGrpcSnapshotClient.hpp"
+#include "grpc_alarm/AlarmGrpcDestroySubscriber.hpp"
 #include <QSettings>
 #include <QDebug>
 #include <QTextCodec>
@@ -21,11 +22,24 @@
 #include <QJsonParseError>
 #include <QSet>
 #include <QDateTime>
+#include <limits>
 #include "dialog/alarm/AlarmFileLogger.h"
 #include "fastdds_newtrack/NewTrackStructAlarmPublisherApp.hpp"
 #include "fastdds_newtrack/NewTrackStructSubscriberApp.hpp"
 
 namespace {
+
+/** DDS 嵌套 int32 trackId 字段兼容；主通道为 string trackId = target_id */
+int legacyDdsTrackId(qint64 targetId)
+{
+    if (targetId <= 0) {
+        return 0;
+    }
+    if (targetId > static_cast<qint64>(std::numeric_limits<int32_t>::max())) {
+        return static_cast<int32_t>(targetId & 0x7FFFFFFF);
+    }
+    return static_cast<int>(targetId);
+}
 
 void parseCsvIntSet(const QString& csv, QSet<int>* out)
 {
@@ -175,25 +189,30 @@ UniqueTrackHit findTrackByUniqueId(CustomConfig* cfg, qint64 uniqueId)
         return hit;
 
     QReadLocker rl(&cfg->m_trackDataLock);
-    const auto tryMap = [&](const QMap<int, SPxPacketTrackExtended>& trackMap, bool isAir) {
+    const auto tryMapQint64 = [&](const QMap<qint64, SPxPacketTrackExtended>& trackMap, bool isAir) {
         if (hit.found)
             return;
-        for (auto it = trackMap.constBegin(); it != trackMap.constEnd(); ++it) {
-            const SPxPacketTrackExtended& tr = it.value();
-            const qint64 uid = static_cast<qint64>(tr.secondary.uniqueID);
-            const int normId = static_cast<int>(tr.norm.min.id);
-            if (uid == uniqueId || (normId > 0 && normId == static_cast<int>(uniqueId))) {
-                hit.track = tr;
-                hit.isAirTrack = isAir;
-                hit.found = true;
-                return;
-            }
+        auto it = trackMap.constFind(uniqueId);
+        if (it != trackMap.constEnd()) {
+            hit.track = it.value();
+            hit.isAirTrack = isAir;
+            hit.found = true;
         }
     };
-    tryMap(cfg->m_mapBirdFuseTrack, true);
-    tryMap(cfg->m_mapBirdRadarTrack, true);
-    tryMap(cfg->m_mapFuseTrack, false);
-    tryMap(cfg->m_mapRadarTrack, false);
+    const auto tryMapInt = [&](const QMap<int, SPxPacketTrackExtended>& trackMap, bool isAir) {
+        if (hit.found || uniqueId > static_cast<qint64>(std::numeric_limits<int>::max()))
+            return;
+        auto it = trackMap.constFind(static_cast<int>(uniqueId));
+        if (it != trackMap.constEnd()) {
+            hit.track = it.value();
+            hit.isAirTrack = isAir;
+            hit.found = true;
+        }
+    };
+    tryMapQint64(cfg->m_mapBirdFuseTrack, true);
+    tryMapInt(cfg->m_mapBirdRadarTrack, true);
+    tryMapQint64(cfg->m_mapFuseTrack, false);
+    tryMapInt(cfg->m_mapRadarTrack, false);
     return hit;
 }
 
@@ -212,7 +231,7 @@ AlarmData buildManualAlarmDataFromTrack(
     ad.alarm_id = QStringLiteral("manual-") + QString::number(uniqueId);
     ad.condition_id = QStringLiteral("manual_confirm");
     ad.mode_id = 1;
-    ad.track_id = static_cast<int>(track.norm.min.id);
+    ad.track_id = 0;
     ad.unique_id = uniqueId;
     ad.targetlat = track.latDegs;
     ad.targetlon = track.longDegs;
@@ -286,6 +305,7 @@ QMutex CustomConfig::mutex;
 CustomConfig::CustomConfig()
 {
     m_alarmGrpcClient = std::make_unique<AlarmGrpcSnapshotClient>();
+    m_alarmDestroyGrpcSubscriber = std::make_unique<AlarmGrpcDestroySubscriber>();
     LoadConfig();
 
     m_dbInitSuccess = dbHelper.initDatabase();
@@ -304,7 +324,10 @@ CustomConfig::CustomConfig()
 }
 
 
-CustomConfig::~CustomConfig() = default;
+CustomConfig::~CustomConfig()
+{
+    stopAlarmDestroyGrpcSubscriber();
+}
 
 void CustomConfig::CleanupDDSResources(int domainId)
 {
@@ -874,7 +897,7 @@ void CustomConfig::SendAllAlarmEventMsg()
                 bool hasTrack = false;
                 {
                     QReadLocker rl(&m_trackDataLock);
-                    hasTrack = m_mapBirdFuseTrack.contains(alarmData.track_id);
+                    hasTrack = m_mapBirdFuseTrack.contains(static_cast<qint64>(alarmData.unique_id));
                 }
                 if (!hasTrack) {
                     continue;
@@ -885,7 +908,7 @@ void CustomConfig::SendAllAlarmEventMsg()
                 bool hasTrack = false;
                 {
                     QReadLocker rl(&m_trackDataLock);
-                    hasTrack = m_mapFuseTrack.contains(alarmData.track_id);
+                    hasTrack = m_mapFuseTrack.contains(static_cast<qint64>(alarmData.unique_id));
                 }
                 if (!hasTrack) {
                     continue;
@@ -935,7 +958,7 @@ void CustomConfig::SendAllAlarmEventMsg()
                 int ruleTrackType = m_mapAlarmRule.value(alarmData.condition_id).track_type;
                 int apiType = (ruleTrackType > 0) ? 1 : 0; // 0-对海 1-对空
                 QMutexLocker filterLocker(&m_alarmFilterMutex);
-                if (m_listAlarmFilter.contains(qMakePair(apiType, alarmData.track_id))) {
+                if (m_listAlarmFilter.contains(qMakePair(apiType, static_cast<qint64>(alarmData.unique_id)))) {
                     continue;
                 }
             }
@@ -1043,7 +1066,7 @@ void CustomConfig::SendAllAlarmEventMsg()
             alarmInfo.areaName(areaName.toStdString());
             
             // 设置航迹ID
-            alarmInfo.trackId(QString::number(alarmData.track_id).toStdString());
+            alarmInfo.trackId(QString::number(alarmData.unique_id).toStdString());
             
             // 设置目标类型和行为ID
             alarmInfo.classId(alarmData.targettype);
@@ -1062,7 +1085,7 @@ void CustomConfig::SendAllAlarmEventMsg()
 
             // 创建目标框信息
             BoundingBox targetBox;
-            targetBox.trackId(alarmData.track_id);
+            targetBox.trackId(legacyDdsTrackId(alarmData.unique_id));
             
             // 创建航迹数据
             TrackData trackData;
@@ -1075,8 +1098,8 @@ void CustomConfig::SendAllAlarmEventMsg()
             {
                 trackType = casia::event::alarm::TrackType::FUSE;
             }
-            trackData.trackId(alarmData.track_id);
-            trackData.mmsi(alarmData.track_id);
+            trackData.trackId(legacyDdsTrackId(alarmData.unique_id));
+            trackData.mmsi(legacyDdsTrackId(alarmData.unique_id));
             trackData.longitude(alarmData.targetlon);
             trackData.latitude(alarmData.targetlat);
             trackData.course(alarmData.targetdir);
@@ -1101,7 +1124,7 @@ void CustomConfig::SendAllAlarmEventMsg()
 
             int apiType = isAirTrack ? 1 : 0;
             QMutexLocker filterLocker(&m_alarmFilterMutex);
-            if (m_listAlarmFilter.contains(qMakePair(apiType, alarmData.track_id))) {
+            if (m_listAlarmFilter.contains(qMakePair(apiType, static_cast<qint64>(alarmData.unique_id)))) {
                 continue;
             }
             filterLocker.unlock();
@@ -1131,7 +1154,7 @@ void CustomConfig::SendAllAlarmEventMsg()
             alarmInfo.alarmLevel(alarmData.threatScore);
             alarmInfo.areaId("");
             alarmInfo.areaName("");
-            alarmInfo.trackId(QString::number(alarmData.track_id).toStdString());
+            alarmInfo.trackId(QString::number(alarmData.unique_id).toStdString());
             alarmInfo.classId(alarmData.targettype);
             alarmInfo.behaviorId(alarmData.targetbehavior);
 
@@ -1148,11 +1171,11 @@ void CustomConfig::SendAllAlarmEventMsg()
             alarmInfo.resolvedTime(resolvedAt.toStdString());
 
             BoundingBox targetBox;
-            targetBox.trackId(alarmData.track_id);
+            targetBox.trackId(legacyDdsTrackId(alarmData.unique_id));
 
             TrackData trackData;
-            trackData.trackId(alarmData.track_id);
-            trackData.mmsi(alarmData.track_id);
+            trackData.trackId(legacyDdsTrackId(alarmData.unique_id));
+            trackData.mmsi(legacyDdsTrackId(alarmData.unique_id));
             trackData.longitude(alarmData.targetlon);
             trackData.latitude(alarmData.targetlat);
             trackData.course(alarmData.targetdir);
@@ -1168,123 +1191,103 @@ void CustomConfig::SendAllAlarmEventMsg()
             alarmEvent.alarm(alarmInfoList);
         }
         
-        // 处理 m_mapTargetType 中不在 m_mapAlarmData 中的 track_id
-        // 收集所有已处理的 track_id
-        QSet<QString> processedTrackIds;
+        // 处理 m_mapTargetType 中不在 m_mapAlarmData 中的 target_id
+        QSet<QString> processedTargetIds;
         for (auto iter = m_mapAlarmData.begin(); iter != m_mapAlarmData.end(); ++iter) {
-            processedTrackIds.insert(QString::number(iter.value().track_id));
+            processedTargetIds.insert(QString::number(iter.value().unique_id));
         }
         for (auto iter = m_mapManualAlarmData.begin(); iter != m_mapManualAlarmData.end(); ++iter) {
-            processedTrackIds.insert(QString::number(iter.value().track_id));
+            processedTargetIds.insert(QString::number(iter.value().unique_id));
         }
-        
-        // 遍历 m_mapTargetType，找出未处理的 track_id
+
         for (auto iter = m_mapTargetType.begin(); iter != m_mapTargetType.end(); ++iter) {
-            QString trackIdStr = iter.key();
-            
-            // 如果这个 track_id 已经在告警数据中处理过，跳过
-            if (processedTrackIds.contains(trackIdStr)) {
+            const QString targetIdStr = iter.key();
+
+            if (processedTargetIds.contains(targetIdStr)) {
                 continue;
             }
-            
-            // 尝试从航迹数据中获取信息
-            bool trackIdOk = false;
-            int trackId = trackIdStr.toInt(&trackIdOk);
-            if (!trackIdOk) {
+
+            bool targetIdOk = false;
+            const qint64 targetId = targetIdStr.toLongLong(&targetIdOk);
+            if (!targetIdOk || targetId <= 0) {
                 continue;
             }
-            
-            // 尝试从融合航迹或雷达航迹中获取信息
+
             SPxPacketTrackExtended track;
             bool foundTrack = false;
             casia::event::alarm::TrackType trackType = casia::event::alarm::TrackType::FUSE;
-            
+
             {
                 QReadLocker rl(&m_trackDataLock);
-                if (m_mapFuseTrack.contains(trackId)) {
-                    track = m_mapFuseTrack.value(trackId);
+                if (m_mapFuseTrack.contains(targetId)) {
+                    track = m_mapFuseTrack.value(targetId);
                     foundTrack = true;
                     trackType = casia::event::alarm::TrackType::FUSE;
-                } else if (m_mapBirdFuseTrack.contains(trackId)) {
-                    track = m_mapBirdFuseTrack.value(trackId);
+                } else if (m_mapBirdFuseTrack.contains(targetId)) {
+                    track = m_mapBirdFuseTrack.value(targetId);
                     foundTrack = true;
                     trackType = casia::event::alarm::TrackType::BIRD;
                 }
             }
-            
+
             if (!foundTrack) {
-                continue; // 如果找不到航迹数据，跳过
+                continue;
             }
-            
-            // 创建告警信息
+
             AlarmInfo alarmInfo;
-            
-            // 设置告警类型
+
             std::vector<AlarmType> alarmTypes;
             alarmTypes.push_back(AlarmType::TRACK_AREA);
             alarmInfo.alarmType(alarmTypes);
-            
-            // 设置告警状态为ACTIVE
+
             alarmInfo.status(AlarmStatus::ACTIVE);
-            
-            // 使用-1作为告警ID
+
             alarmInfo.alarmId("-1");
 
-            const qint64 trackUniqueId = static_cast<qint64>(track.secondary.uniqueID);
-            const bool manuallyConfirmed = m_setManualConfirmedUniqueIds.contains(trackUniqueId);
+            const bool manuallyConfirmed = m_setManualConfirmedUniqueIds.contains(targetId);
             QString currentTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz");
             if (manuallyConfirmed) {
                 alarmInfo.taskStatus(casia::event::alarm::AlarmTaskStatus::VERIFY_SUCCESS);
-                const QString resolvedAt = m_mapManualConfirmResolvedTimeByUniqueId.value(trackUniqueId, currentTime);
+                const QString resolvedAt = m_mapManualConfirmResolvedTimeByUniqueId.value(targetId, currentTime);
                 alarmInfo.resolvedTime(resolvedAt.toStdString());
             } else {
                 alarmInfo.taskStatus(casia::event::alarm::AlarmTaskStatus::UNASSIGNED);
             }
-            
-            // 设置告警内容
-            QString alarmContent = QString("目标类型更新: 航迹ID %1").arg(trackId);
+
+            QString alarmContent = QString("目标类型更新: target_id %1").arg(targetId);
             alarmInfo.alarmContent(alarmContent.toStdString());
-            
-            // 设置告警级别为默认值1
+
             alarmInfo.alarmLevel(1);
-            
-            // 设置区域ID为空
+
             alarmInfo.areaId("");
             alarmInfo.areaName("");
-            
-            // 设置航迹ID
-            alarmInfo.trackId(trackIdStr.toStdString());
-            
-            // 设置目标类型（从 m_mapTargetType 中获取）
+
+            alarmInfo.trackId(targetIdStr.toStdString());
+
             alarmInfo.classId(iter.value());
-            alarmInfo.behaviorId(0); // 默认行为ID
-            
-            // 设置位置信息
+            alarmInfo.behaviorId(0);
+
             casia::event::alarm::GeoPosition position;
             position.longitude(track.longDegs);
             position.latitude(track.latDegs);
             position.altitude(track.altitudeMetres);
             alarmInfo.position(position);
-            
-            // 设置时间信息
+
             alarmInfo.updateTime(currentTime.toStdString());
-            
-            // 创建目标框信息
+
             BoundingBox targetBox;
-            targetBox.trackId(trackId);
+            targetBox.trackId(legacyDdsTrackId(targetId));
             alarmInfo.targetBox(targetBox);
-            
-            // 创建航迹数据
+
             TrackData trackData;
-            trackData.trackId(trackId);
+            trackData.trackId(legacyDdsTrackId(targetId));
             trackData.longitude(track.longDegs);
             trackData.latitude(track.latDegs);
             trackData.course(track.norm.min.courseDegrees);
             trackData.speed(track.norm.min.speedMps);
             trackData.trackType(trackType);
             alarmInfo.track(trackData);
-            
-            // 将告警信息添加到告警事件中
+
             std::vector<AlarmInfo> alarmInfoList = alarmEvent.alarm();
             alarmInfoList.push_back(alarmInfo);
             alarmEvent.alarm(alarmInfoList);
@@ -1305,10 +1308,10 @@ void CustomConfig::SendAllAlarmEventMsg()
     }
 }
 
-void CustomConfig::addAlarmFilter(int type, int trackid)
+void CustomConfig::addAlarmFilter(int type, qint64 targetId)
 {
     QMutexLocker locker(&m_alarmFilterMutex);
-    QPair<int, int> p = qMakePair(type, trackid);
+    QPair<int, qint64> p = qMakePair(type, targetId);
     if (!m_listAlarmFilter.contains(p)) {
         m_listAlarmFilter.append(p);
     }
@@ -1655,7 +1658,31 @@ void CustomConfig::LoadConfig()
     qInfo() << "GrpcAlarm 配置: enabled=" << grpcEnabled
             << "host=" << grpcHost << "port=" << grpcPort;
 
+    const bool destroyGrpcEnabled = settings.value(QStringLiteral("GrpcDestroy/Enabled"), 1).toInt() != 0;
+    const QString destroyGrpcHost = settings.value(QStringLiteral("GrpcDestroy/Host"), grpcHost).toString();
+    const int destroyGrpcPort = settings.value(QStringLiteral("GrpcDestroy/Port"), 50061).toInt();
+    if (m_alarmDestroyGrpcSubscriber) {
+        m_alarmDestroyGrpcSubscriber->configure(
+            destroyGrpcHost.toStdString(), destroyGrpcPort, destroyGrpcEnabled);
+        qInfo() << "GrpcDestroy 配置: enabled=" << destroyGrpcEnabled
+                << "host=" << destroyGrpcHost << "port=" << destroyGrpcPort;
+    }
+
     m_dbInitSuccess = false;
+}
+
+void CustomConfig::startAlarmDestroyGrpcSubscriber()
+{
+    if (m_alarmDestroyGrpcSubscriber) {
+        m_alarmDestroyGrpcSubscriber->start(this);
+    }
+}
+
+void CustomConfig::stopAlarmDestroyGrpcSubscriber()
+{
+    if (m_alarmDestroyGrpcSubscriber) {
+        m_alarmDestroyGrpcSubscriber->stop();
+    }
 }
 
 void CustomConfig::SaveConfig()

@@ -107,7 +107,7 @@ AlarmItem buildAlarmItem(const AlarmData& alarmData, CustomConfig* cfg, const QS
     item.set_content(
         QStringLiteral("告警规则:%1 航迹:%2")
             .arg(alarmData.condition_id)
-            .arg(alarmData.track_id)
+            .arg(alarmData.unique_id)
             .toStdString());
     item.set_level(threatLevelFromScore(alarmData.threatScore));
     item.mutable_area()->set_area_id(
@@ -138,54 +138,13 @@ bool passesTrackFilter(const AlarmData& alarmData, CustomConfig* cfg)
     const int ruleTrackType = cfg->m_mapAlarmRule.value(alarmData.condition_id).track_type;
     const int apiType = (ruleTrackType > 0) ? 1 : 0;
     QMutexLocker filterLocker(&cfg->m_alarmFilterMutex);
-    return !cfg->m_listAlarmFilter.contains(qMakePair(apiType, alarmData.track_id));
+    return !cfg->m_listAlarmFilter.contains(
+        qMakePair(apiType, static_cast<qint64>(alarmData.unique_id)));
 }
 
-constexpr qint64 kStableUniqueIdThreshold = 100000LL;
-
-qint64 resolveGrpcTargetUniqueId(const AlarmData& alarmData, CustomConfig* cfg, int ruleTrackType)
+qint64 resolveGrpcTargetUniqueId(const AlarmData& alarmData, CustomConfig* /*cfg*/, int /*ruleTrackType*/)
 {
-    qint64 uid = alarmData.unique_id;
-    if (uid >= kStableUniqueIdThreshold) {
-        return uid;
-    }
-    if (!cfg || alarmData.track_id <= 0) {
-        return uid;
-    }
-
-    QReadLocker rl(&cfg->m_trackDataLock);
-    const int trackId = alarmData.track_id;
-    const bool preferAir = ruleTrackType > 0;
-
-    auto tryMap = [&](const QMap<int, SPxPacketTrackExtended>& trackMap) -> qint64 {
-        if (!trackMap.contains(trackId)) {
-            return 0;
-        }
-        const qint64 trackUid = static_cast<qint64>(trackMap.value(trackId).secondary.uniqueID);
-        return trackUid >= kStableUniqueIdThreshold ? trackUid : 0;
-    };
-
-    if (preferAir) {
-        const qint64 fromBird = tryMap(cfg->m_mapBirdFuseTrack);
-        if (fromBird >= kStableUniqueIdThreshold) {
-            return fromBird;
-        }
-    } else {
-        const qint64 fromFuse = tryMap(cfg->m_mapFuseTrack);
-        if (fromFuse >= kStableUniqueIdThreshold) {
-            return fromFuse;
-        }
-    }
-
-    const qint64 fromBird = tryMap(cfg->m_mapBirdFuseTrack);
-    if (fromBird >= kStableUniqueIdThreshold) {
-        return fromBird;
-    }
-    const qint64 fromFuse = tryMap(cfg->m_mapFuseTrack);
-    if (fromFuse >= kStableUniqueIdThreshold) {
-        return fromFuse;
-    }
-    return uid;
+    return static_cast<qint64>(alarmData.unique_id);
 }
 
 struct SnapshotKey
@@ -388,7 +347,8 @@ bool AlarmGrpcSnapshotClient::pushSnapshot(CustomConfig* cfg)
             const int apiType = isAirTrack ? 1 : 0;
             {
                 QMutexLocker filterLocker(&cfg->m_alarmFilterMutex);
-                if (cfg->m_listAlarmFilter.contains(qMakePair(apiType, alarmData.track_id))) {
+                if (cfg->m_listAlarmFilter.contains(
+                        qMakePair(apiType, static_cast<qint64>(alarmData.unique_id)))) {
                     continue;
                 }
             }
