@@ -1744,6 +1744,52 @@ QMap<QString, QStringList> DataAccessLayer::getIdentificationRuleIdsByAreaForAct
     return map;
 }
 
+QMap<QString, QStringList> DataAccessLayer::getVerificationRuleIdsByAreaForActiveScheme()
+{
+    QMap<QString, QStringList> map;
+    const QString schemeId = getActiveSchemeId();
+    const QString query =
+        "SELECT group_id, area_id, rule_id FROM area_verification_rules "
+        "WHERE scheme_id = ? AND COALESCE(enabled, true) = true "
+        "ORDER BY group_id, area_id, rule_id";
+    QSqlQuery result = m_dbManager.executeQuery(query, { schemeId });
+    while (result.next()) {
+        const int g = result.value(QStringLiteral("group_id")).toInt();
+        const int a = result.value(QStringLiteral("area_id")).toInt();
+        const QString rid = result.value(QStringLiteral("rule_id")).toString();
+        const QString k = QString::number(g) + QLatin1Char('_') + QString::number(a);
+        QStringList& lst = map[k];
+        if (!lst.contains(rid))
+            lst.append(rid);
+    }
+    return map;
+}
+
+QMap<QString, QList<AreaHandleRuleBinding>> DataAccessLayer::getAreaHandleRulesByAreaForActiveScheme()
+{
+    QMap<QString, QList<AreaHandleRuleBinding>> map;
+    const QString schemeId = getActiveSchemeId();
+    const QString query =
+        "SELECT group_id, area_id, handle_scheme_id, handle_scheme_name, priority, enabled "
+        "FROM area_handle_rules "
+        "WHERE scheme_id = ? AND COALESCE(enabled, true) = true "
+        "ORDER BY group_id, area_id, priority ASC, handle_scheme_id";
+    QSqlQuery result = m_dbManager.executeQuery(query, { schemeId });
+    while (result.next()) {
+        AreaHandleRuleBinding row;
+        row.handleSchemeId = result.value(QStringLiteral("handle_scheme_id")).toString();
+        row.handleSchemeName = result.value(QStringLiteral("handle_scheme_name")).toString();
+        row.priority = result.value(QStringLiteral("priority")).toInt();
+        QVariant en = result.value(QStringLiteral("enabled"));
+        row.enabled = en.isNull() ? true : en.toBool();
+        const int g = result.value(QStringLiteral("group_id")).toInt();
+        const int a = result.value(QStringLiteral("area_id")).toInt();
+        const QString k = QString::number(g) + QLatin1Char('_') + QString::number(a);
+        map[k].append(row);
+    }
+    return map;
+}
+
 QMap<int, TargetInfoFilter> DataAccessLayer::getTargetInfoFilter()
 {
     QString query = "SELECT * FROM filter_target_table";

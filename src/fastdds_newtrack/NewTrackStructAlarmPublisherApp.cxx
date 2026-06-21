@@ -37,11 +37,15 @@ NewTrackAlarmDdsConfig loadNewTrackAlarmDdsConfig()
 }
 } // namespace
 
-NewTrackStructAlarmPublisherApp::NewTrackStructAlarmPublisherApp(const int& domain_id, int mode)
+NewTrackStructAlarmPublisherApp::NewTrackStructAlarmPublisherApp(
+    const int& domain_id, int mode, const QString& topic_override)
     : factory_(nullptr)
     , type_(new TargetFull::TargetOutputSetPubSubType())
 {
-    const NewTrackAlarmDdsConfig dds_cfg = loadNewTrackAlarmDdsConfig();
+    NewTrackAlarmDdsConfig dds_cfg = loadNewTrackAlarmDdsConfig();
+    if (!topic_override.isEmpty()) {
+        dds_cfg.topic_name = topic_override;
+    }
     const QString xml_file = (mode == 0) ? dds_cfg.xml_multi : dds_cfg.xml_single;
     const QString participant_profile =
         (mode == 0) ? dds_cfg.participant_profile_multi : dds_cfg.participant_profile_single;

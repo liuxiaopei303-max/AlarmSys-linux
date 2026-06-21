@@ -52,15 +52,39 @@ bool AlarmHttpServer::start(quint16 port)
             socket->disconnectFromHost();
         };
 
-        auto updateRule = [this]() {
+        auto updateRule = [this](const QString& scope) {
             if (!m_cfg) {
                 return;
             }
-            m_cfg->m_mapAlarmRule = m_cfg->dbHelper.getAlarmRule();
-            m_cfg->m_alarmArea = m_cfg->dbHelper.getAreaInfo();
+            m_cfg->reloadAlarmConfigFromDb(scope);
         };
 
-        connect(clientSocket, &QTcpSocket::readyRead, this, [this, clientSocket, updateRule, sendHttpResponse]() {
+        auto parseReloadScope = [](const QByteArray& requestData, const QString& method) -> QString {
+            if (method != QLatin1String("POST") && method != QLatin1String("PUT")) {
+                return QStringLiteral("all");
+            }
+            QByteArray bodyBytes;
+            const int bodyStart = requestData.indexOf("\r\n\r\n");
+            if (bodyStart >= 0) {
+                bodyBytes = requestData.mid(bodyStart + 4).trimmed();
+            }
+            if (bodyBytes.isEmpty()) {
+                return QStringLiteral("all");
+            }
+            QJsonParseError parseError;
+            const QJsonDocument doc = QJsonDocument::fromJson(bodyBytes, &parseError);
+            if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+                return QStringLiteral("all");
+            }
+            const QJsonObject root = doc.object();
+            const QJsonValue scopeVal = root.value(QStringLiteral("scope"));
+            if (scopeVal.isString() && !scopeVal.toString().trimmed().isEmpty()) {
+                return scopeVal.toString().trimmed();
+            }
+            return QStringLiteral("all");
+        };
+
+        connect(clientSocket, &QTcpSocket::readyRead, this, [this, clientSocket, updateRule, parseReloadScope, sendHttpResponse]() {
             const QByteArray requestData = clientSocket->readAll();
             const QString requestString = QString::fromUtf8(requestData);
             const QStringList requestLines = requestString.split("\r\n");
@@ -157,9 +181,11 @@ bool AlarmHttpServer::start(quint16 port)
             }
 
             if (pathOnly == QLatin1String("/api/alarms/update") || pathOnly == QLatin1String("api/alarms/update")) {
-                updateRule();
+                const QString scope = parseReloadScope(requestData, method);
+                updateRule(scope);
                 QJsonObject resp;
                 resp[QStringLiteral("code")] = 0;
+                resp[QStringLiteral("scope")] = scope;
                 resp[QStringLiteral("message")] = QStringLiteral("ok");
                 sendHttpResponse(clientSocket, 200, QStringLiteral("OK"), QJsonDocument(resp).toJson(QJsonDocument::Compact));
                 return;

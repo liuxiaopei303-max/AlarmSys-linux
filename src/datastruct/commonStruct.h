@@ -120,8 +120,20 @@ struct AlarmLogicConfig {
     int noAlarmGroupId = 1;                 /**< 免告警区 group_id；-1 表示关闭免告警区判定 */
     int fuseMapRequireContain = 1;          /**< 1=融合航迹必须在 m_mapFuseTrack 中存在（原 Linux） */
     int trackAlreadyHasAlarmWindowMs = 60000; /**< “持续告警”判定窗口 */
+    int alarmFilterTtlMs = 3600000;         /**< 灭告警 filter 存续时间（毫秒），默认 1 小时 */
     int speedDoubleCheckFuseTrackOnly = 1;    /**< 1=仅融合(type==0) 连续两次速度判定（原 Windows） */
     int defaultThreatScore = 90;            /**< 黑名单直告警或未计算威胁度时的默认 threatScore */
+};
+
+/** 可疑目标研判与 DDS 发布（Config.ini [SuspiciousTarget]） */
+struct SuspiciousTargetConfig {
+    int enabled = 0;                       /**< 0=关闭 SuspiciousTargetThread，1=启用 */
+    int judgeIntervalMs = 5000;            /**< 研判周期（毫秒），默认 5s */
+    double speedLowThresholdMps = 3.0;     /**< 规则1：速度下限（m/s），且与保护区夹角≤ protectAngleMaxDeg */
+    double speedHighThresholdMps = 8.0;    /**< 规则2：速度下限（m/s），无需角度条件 */
+    double protectAngleMaxDeg = 30.0;      /**< 规则1：航向与指向保护区圆心方位夹角上限（度） */
+    int speedCheckClearIntervalMin = 30;   /**< 速度二次确认状态表清空间隔（分钟） */
+    QString ddsTopic = QStringLiteral("NewTrackStructSuspicious"); /**< DDS 发布 topic */
 };
 
 struct BasicConfig
@@ -1957,6 +1969,14 @@ struct AlarmIdentificationRuleSub {
     bool enabled = true;
     QDateTime created_at;
     QDateTime updated_at;
+};
+
+/** 区域处置规则绑定 area_handle_rules（激活方案下按区域） */
+struct AreaHandleRuleBinding {
+    QString handleSchemeId;
+    QString handleSchemeName;
+    int priority = 0;
+    bool enabled = true;
 };
 
 //告警数据结构体

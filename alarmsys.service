@@ -1,0 +1,19 @@
+[Unit]
+Description=AlarmSys alarmsys (AlarmSys-linux)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__INSTALL_ROOT__/bin
+ExecStart=__INSTALL_ROOT__/run_with_coredump_gdb.sh --log __INSTALL_ROOT__/bin/alarmsys.log -- ./alarmsys
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+Environment=LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/fastdds3/lib
+
+[Install]
+WantedBy=multi-user.target

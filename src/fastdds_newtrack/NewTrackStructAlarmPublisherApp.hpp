@@ -2,6 +2,7 @@
 
 #include <mutex>
 
+#include <QString>
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
 #include <fastdds/dds/publisher/DataWriter.hpp>
@@ -23,7 +24,8 @@
 class NewTrackStructAlarmPublisherApp : public eprosima::fastdds::dds::DataWriterListener
 {
 public:
-    NewTrackStructAlarmPublisherApp(const int& domain_id, int mode);
+    /** @param topic_override 非空时覆盖 Config.ini DDS/NewTrackAlarmTopic */
+    NewTrackStructAlarmPublisherApp(const int& domain_id, int mode, const QString& topic_override = QString());
     ~NewTrackStructAlarmPublisherApp();
 
     bool send(const TargetFull::TargetOutputSet& msg);

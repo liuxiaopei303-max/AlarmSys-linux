@@ -289,6 +289,15 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, qint64 targetId, float lat, floa
 			.arg(info.condition_id));
 		return;
 	}
+	if (gConfig->isUniqueIdAlarmFiltered(targetId)) {
+		logAlarmTraceThrottled(
+			QStringLiteral("save_filtered_%1").arg(targetId),
+			QStringLiteral("SaveToDB skip filtered------targetId:%1 conditionId:%2")
+				.arg(targetId)
+				.arg(info.condition_id),
+			30000);
+		return;
+	}
 
 	const AlarmLogicConfig& al = gConfig->m_alarmLogic;
 	const bool saveDb = al.saveAlarmToDb != 0;

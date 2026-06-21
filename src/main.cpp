@@ -2,6 +2,7 @@
 #include "customconfig.h"
 #include "db/DatabaseManager.h"
 #include "dialog/alarm/TrackAlarmThread.h"
+#include "dialog/alarm/SuspiciousTargetThread.h"
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -35,6 +36,12 @@ int main(int argc, char* argv[])
     TrackAlarmThread* alarmThread = new TrackAlarmThread(1);
     alarmThread->start();
 
+    SuspiciousTargetThread* suspiciousThread = nullptr;
+    if (cfg->m_suspiciousTarget.enabled) {
+        suspiciousThread = new SuspiciousTargetThread();
+        suspiciousThread->start();
+    }
+
     const quint16 httpPort = static_cast<quint16>(cfg->m_struBasicConfig.m_nTaskHostPort);
     AlarmHttpServer http(cfg);
     if (!http.start(httpPort)) {
@@ -47,6 +54,12 @@ int main(int argc, char* argv[])
     alarmThread->stop();
     alarmThread->wait(5000);
     delete alarmThread;
+
+    if (suspiciousThread != nullptr) {
+        suspiciousThread->stop();
+        suspiciousThread->wait(5000);
+        delete suspiciousThread;
+    }
 
     cfg->stopAlarmDestroyGrpcSubscriber();
     cfg->DestoryFastdds();

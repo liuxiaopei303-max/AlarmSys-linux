@@ -314,6 +314,8 @@ CustomConfig::CustomConfig()
     m_mapAlarmRule =  dbHelper.getAlarmRule();
     m_mapAlarmIdentificationRulesSub = dbHelper.getAlarmIdentificationRulesSub();
     m_mapAreaKeyToIdentificationRuleIds = dbHelper.getIdentificationRuleIdsByAreaForActiveScheme();
+    m_mapAreaKeyToVerificationRuleIds = dbHelper.getVerificationRuleIdsByAreaForActiveScheme();
+    m_mapAreaKeyToHandleRules = dbHelper.getAreaHandleRulesByAreaForActiveScheme();
     m_alarmArea = dbHelper.getAreaInfo();
     m_mapTargetInfoFilter = dbHelper.getTargetInfoFilter();
     m_listThreatAssessmentParams = dbHelper.getThreatAssessmentParams();
@@ -478,6 +480,22 @@ void CustomConfig::InitFastdds()
         qDebug() << "NewTrackStruct DDS初始化失败:" << e.what();
     }
 
+    if (m_suspiciousTarget.enabled) {
+        try {
+            m_suspiciousTargetPublisherMulti = new NewTrackStructAlarmPublisherApp(
+                trackDDSPort, 0, m_suspiciousTarget.ddsTopic);
+            m_suspiciousTargetPublisherSingle = new NewTrackStructAlarmPublisherApp(
+                trackDDSPort, 1, m_suspiciousTarget.ddsTopic);
+            qInfo() << "SuspiciousTarget DDS 发布已启用 topic=" << m_suspiciousTarget.ddsTopic
+                    << " domain=" << trackDDSPort;
+        }
+        catch (std::exception& e) {
+            qDebug() << "SuspiciousTarget DDS 发布者初始化失败:" << e.what();
+            m_suspiciousTargetPublisherMulti = nullptr;
+            m_suspiciousTargetPublisherSingle = nullptr;
+        }
+    }
+
     //try{
     //    m_recognitionPublisher = new FastddsRecognitionPublisherApp(m_struBasicConfig.m_nRecognitionDDSPort);
     //    std::thread recognitionThread(&FastddsRecognitionApplication::run, m_recognitionPublisher);
@@ -549,6 +567,28 @@ void CustomConfig::DestoryFastdds()
         m_newTrackStructAlarmPublisherSingle = nullptr;
     }
 
+    if (m_suspiciousTargetPublisherMulti != nullptr)
+    {
+        try {
+            delete m_suspiciousTargetPublisherMulti;
+        }
+        catch (const std::exception& e) {
+            qDebug() << "销毁SuspiciousTarget组播发布者异常:" << e.what();
+        }
+        m_suspiciousTargetPublisherMulti = nullptr;
+    }
+
+    if (m_suspiciousTargetPublisherSingle != nullptr)
+    {
+        try {
+            delete m_suspiciousTargetPublisherSingle;
+        }
+        catch (const std::exception& e) {
+            qDebug() << "销毁SuspiciousTarget单播发布者异常:" << e.what();
+        }
+        m_suspiciousTargetPublisherSingle = nullptr;
+    }
+
     if (m_trackSubscriber != nullptr)
     {
         try {
@@ -593,6 +633,41 @@ void CustomConfig::DestoryFastdds()
     m_bFastDDSInitialized = false;
     
     qDebug() << "FastDDS资源销毁完成";
+}
+
+void CustomConfig::reloadAlarmConfigFromDb(const QString& scope)
+{
+    if (!m_dbInitSuccess && !dbHelper.initDatabase()) {
+        qWarning() << "reloadAlarmConfigFromDb: 数据库未就绪";
+        return;
+    }
+    const QString s = scope.trimmed().isEmpty() ? QStringLiteral("all") : scope.trimmed();
+    const bool all = (s == QLatin1String("all"));
+    if (all || s == QLatin1String("alarm_rules")) {
+        m_mapAlarmRule = dbHelper.getAlarmRule();
+        m_alarmArea = dbHelper.getAreaInfo();
+        m_mapSchemeProtectAreas = dbHelper.getActiveSchemeProtectAreas();
+        qInfo() << "热更新 alarm_rules: alarm_setting" << m_mapAlarmRule.size()
+                << "area" << m_alarmArea.size();
+    }
+    if (all || s == QLatin1String("threat_params")) {
+        m_listThreatAssessmentParams = dbHelper.getThreatAssessmentParams();
+        qInfo() << "热更新 threat_params:" << m_listThreatAssessmentParams.size();
+    }
+    if (all || s == QLatin1String("identification")) {
+        m_mapAlarmIdentificationRulesSub = dbHelper.getAlarmIdentificationRulesSub();
+        m_mapAreaKeyToIdentificationRuleIds = dbHelper.getIdentificationRuleIdsByAreaForActiveScheme();
+        qInfo() << "热更新 identification: rules" << m_mapAlarmIdentificationRulesSub.size()
+                << "area_bindings" << m_mapAreaKeyToIdentificationRuleIds.size();
+    }
+    if (all || s == QLatin1String("verification")) {
+        m_mapAreaKeyToVerificationRuleIds = dbHelper.getVerificationRuleIdsByAreaForActiveScheme();
+        qInfo() << "热更新 verification: area_bindings" << m_mapAreaKeyToVerificationRuleIds.size();
+    }
+    if (all || s == QLatin1String("handle_rules")) {
+        m_mapAreaKeyToHandleRules = dbHelper.getAreaHandleRulesByAreaForActiveScheme();
+        qInfo() << "热更新 handle_rules: area_bindings" << m_mapAreaKeyToHandleRules.size();
+    }
 }
 
 ThreatAssessmentParams CustomConfig::getThreatAssessmentParams(int groupId, int areaId)
@@ -732,6 +807,65 @@ void CustomConfig::SendNewTrackStructAlarmMsg(const AlarmEvent* alarmEvent)
     if (!ok) {
         qDebug() << "NewTrackStructAlarm发送失败";
     }
+}
+
+int CustomConfig::SendSuspiciousTargetMsg(const QSet<QString>& suspiciousUniqueIds)
+{
+    if (!m_bFastDDSInitialized || m_newTrackStructSubscriber == nullptr) {
+        return 0;
+    }
+    if (m_suspiciousTargetPublisherMulti == nullptr && m_suspiciousTargetPublisherSingle == nullptr) {
+        return 0;
+    }
+    if (suspiciousUniqueIds.isEmpty()) {
+        return 0;
+    }
+
+    TargetFull::TargetOutputSet merged;
+    if (!m_newTrackStructSubscriber->build_merged_latest(merged)) {
+        qDebug() << "SuspiciousTarget DDS 跳过: build_merged_latest 失败 ids=" << suspiciousUniqueIds.size();
+        return 0;
+    }
+
+    std::vector<TargetFull::TargetObject> filteredTargets;
+    filteredTargets.reserve(static_cast<size_t>(suspiciousUniqueIds.size()));
+    QSet<QString> remainingIds = suspiciousUniqueIds;
+    for (const auto& target : merged.targets()) {
+        const QString targetId = QString::fromStdString(target.target_id()).trimmed();
+        if (!targetId.isEmpty() && remainingIds.contains(targetId)) {
+            filteredTargets.push_back(target);
+            remainingIds.remove(targetId);
+        }
+    }
+
+    // 合并 batch 未命中时仍发布最小 TargetObject（仅 target_id），保证下游能收到 ID 列表
+    for (const QString& id : remainingIds) {
+        TargetFull::TargetObject stub;
+        stub.target_id(id.toStdString());
+        filteredTargets.push_back(std::move(stub));
+    }
+
+    if (filteredTargets.empty()) {
+        return 0;
+    }
+
+    TargetFull::TargetOutputSet filtered;
+    filtered.targets(std::move(filteredTargets));
+    filtered.groups(std::vector<TargetFull::GroupObject>());
+
+    bool ok = false;
+    if (m_suspiciousTargetPublisherMulti) {
+        ok = m_suspiciousTargetPublisherMulti->send(filtered) || ok;
+    }
+    if (m_suspiciousTargetPublisherSingle) {
+        ok = m_suspiciousTargetPublisherSingle->send(filtered) || ok;
+    }
+    if (!ok) {
+        qDebug() << "SuspiciousTarget DDS 发送失败 topic=" << m_suspiciousTarget.ddsTopic
+                 << "targets=" << filtered.targets().size();
+        return 0;
+    }
+    return static_cast<int>(filtered.targets().size());
 }
 
 bool CustomConfig::alarmEventPushFullEnabled() const
@@ -953,14 +1087,9 @@ void CustomConfig::SendAllAlarmEventMsg()
         // 遍历告警数据并转换为AlarmEvent结构体
         for (auto iter = m_mapAlarmData.begin(); iter != m_mapAlarmData.end(); ++iter) {
             const AlarmData& alarmData = iter.value();
-            // 告警过滤：若该 trackid 在过滤列表中且规则 track_type 与过滤 type 一致则不发送
-            if (m_mapAlarmRule.contains(alarmData.condition_id)) {
-                int ruleTrackType = m_mapAlarmRule.value(alarmData.condition_id).track_type;
-                int apiType = (ruleTrackType > 0) ? 1 : 0; // 0-对海 1-对空
-                QMutexLocker filterLocker(&m_alarmFilterMutex);
-                if (m_listAlarmFilter.contains(qMakePair(apiType, static_cast<qint64>(alarmData.unique_id)))) {
-                    continue;
-                }
+            // 灭告警：按 unique_id 过滤（对海/对空 type 任一命中即不发布）
+            if (isUniqueIdAlarmFiltered(static_cast<qint64>(alarmData.unique_id))) {
+                continue;
             }
             qint64 time_now = QDateTime::currentDateTime().toMSecsSinceEpoch();
             qint64 time_alarm = QDateTime::fromString(iter.value().time, "yyyy-MM-dd hh:mm:ss.zzz").toMSecsSinceEpoch();
@@ -1121,13 +1250,9 @@ void CustomConfig::SendAllAlarmEventMsg()
             const AlarmData& alarmData = iter.value();
             const bool isAirTrack = m_mapManualAlarmAirTrack.value(
                 static_cast<qint64>(alarmData.unique_id), false);
-
-            int apiType = isAirTrack ? 1 : 0;
-            QMutexLocker filterLocker(&m_alarmFilterMutex);
-            if (m_listAlarmFilter.contains(qMakePair(apiType, static_cast<qint64>(alarmData.unique_id)))) {
+            if (isUniqueIdAlarmFiltered(static_cast<qint64>(alarmData.unique_id))) {
                 continue;
             }
-            filterLocker.unlock();
 
             qint64 time_now = QDateTime::currentDateTime().toMSecsSinceEpoch();
             qint64 time_alarm = QDateTime::fromString(alarmData.time, "yyyy-MM-dd hh:mm:ss.zzz").toMSecsSinceEpoch();
@@ -1210,6 +1335,9 @@ void CustomConfig::SendAllAlarmEventMsg()
             bool targetIdOk = false;
             const qint64 targetId = targetIdStr.toLongLong(&targetIdOk);
             if (!targetIdOk || targetId <= 0) {
+                continue;
+            }
+            if (isUniqueIdAlarmFiltered(targetId)) {
                 continue;
             }
 
@@ -1308,13 +1436,85 @@ void CustomConfig::SendAllAlarmEventMsg()
     }
 }
 
+void CustomConfig::pruneExpiredAlarmFiltersLocked(qint64 nowMs)
+{
+    for (auto it = m_mapAlarmFilterExpireMs.begin(); it != m_mapAlarmFilterExpireMs.end(); ) {
+        if (it.value() <= nowMs) {
+            qInfo() << "alarm_filter expired type=" << it.key().first
+                    << "target_id=" << it.key().second;
+            it = m_mapAlarmFilterExpireMs.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void CustomConfig::removeAlarmFilterForUniqueId(qint64 uniqueId)
+{
+    if (uniqueId <= 0) {
+        return;
+    }
+    QMutexLocker locker(&m_alarmFilterMutex);
+    const bool had0 = m_mapAlarmFilterExpireMs.remove(qMakePair(0, uniqueId)) > 0;
+    const bool had1 = m_mapAlarmFilterExpireMs.remove(qMakePair(1, uniqueId)) > 0;
+    if (had0 || had1) {
+        qInfo() << "alarm_filter cleared by manual confirm target_id=" << uniqueId;
+    }
+}
+
 void CustomConfig::addAlarmFilter(int type, qint64 targetId)
 {
-    QMutexLocker locker(&m_alarmFilterMutex);
-    QPair<int, qint64> p = qMakePair(type, targetId);
-    if (!m_listAlarmFilter.contains(p)) {
-        m_listAlarmFilter.append(p);
+    if (targetId <= 0) {
+        return;
     }
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const qint64 expireMs = nowMs + qMax<qint64>(1000, m_alarmLogic.alarmFilterTtlMs);
+    {
+        QMutexLocker locker(&m_alarmFilterMutex);
+        m_mapAlarmFilterExpireMs.insert(qMakePair(type, targetId), expireMs);
+        qInfo() << "alarm_filter add type=" << type << "target_id=" << targetId
+                << "expire_ms=" << expireMs << "ttl_ms=" << m_alarmLogic.alarmFilterTtlMs;
+    }
+
+    // 从内存告警表剔除该目标，避免 TrackAlarmThread 下一轮继续刷新并发布
+    {
+        QMutexLocker locker(&m_alarmDataMutex);
+        QList<QString> ruleKeys;
+        for (auto it = m_mapAlarmData.constBegin(); it != m_mapAlarmData.constEnd(); ++it) {
+            if (static_cast<qint64>(it.value().unique_id) == targetId) {
+                ruleKeys.append(it.key());
+            }
+        }
+        for (const QString& k : ruleKeys) {
+            m_mapAlarmData.remove(k);
+        }
+
+        QList<QString> manualKeys;
+        for (auto it = m_mapManualAlarmData.constBegin(); it != m_mapManualAlarmData.constEnd(); ++it) {
+            if (static_cast<qint64>(it.value().unique_id) == targetId) {
+                manualKeys.append(it.key());
+            }
+        }
+        for (const QString& k : manualKeys) {
+            m_mapManualAlarmData.remove(k);
+        }
+    }
+    m_mapTargetType.remove(QString::number(targetId));
+}
+
+bool CustomConfig::isUniqueIdAlarmFiltered(qint64 uniqueId)
+{
+    if (uniqueId <= 0) {
+        return false;
+    }
+    QMutexLocker locker(&m_alarmFilterMutex);
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    pruneExpiredAlarmFiltersLocked(nowMs);
+    const auto isActive = [&](int type) {
+        const auto it = m_mapAlarmFilterExpireMs.constFind(qMakePair(type, uniqueId));
+        return it != m_mapAlarmFilterExpireMs.constEnd() && it.value() > nowMs;
+    };
+    return isActive(0) || isActive(1);
 }
 
 bool CustomConfig::confirmAlarmByUniqueId(qint64 uniqueId, QString* outMessage)
@@ -1324,6 +1524,9 @@ bool CustomConfig::confirmAlarmByUniqueId(qint64 uniqueId, QString* outMessage)
             *outMessage = QStringLiteral("invalid uniqueId");
         return false;
     }
+
+    // 手动标蓝/确认告警：解除该 unique_id 的灭告警 filter，恢复规则与手动告警发布
+    removeAlarmFilterForUniqueId(uniqueId);
 
     QMutexLocker locker(&m_alarmDataMutex);
     const QString nowStr = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd hh:mm:ss.zzz"));
@@ -1371,6 +1574,9 @@ bool CustomConfig::confirmAlarmByUniqueId(qint64 uniqueId, QString* outMessage)
     }
 
     const qint64 storageUniqueId = effectiveUniqueIdFromTrackHit(hit, uniqueId);
+    if (storageUniqueId != uniqueId) {
+        removeAlarmFilterForUniqueId(storageUniqueId);
+    }
     m_setManualConfirmedUniqueIds.insert(storageUniqueId);
     if (!m_mapManualConfirmResolvedTimeByUniqueId.contains(storageUniqueId)) {
         m_mapManualConfirmResolvedTimeByUniqueId.insert(storageUniqueId, nowStr);
@@ -1647,8 +1853,31 @@ void CustomConfig::LoadConfig()
     m_alarmLogic.noAlarmGroupId = settings.value(QStringLiteral("AlarmLogic/NoAlarmGroupId"), 1).toInt();
     m_alarmLogic.fuseMapRequireContain = settings.value("AlarmLogic/FuseMapRequireContain", 1).toInt();
     m_alarmLogic.trackAlreadyHasAlarmWindowMs = settings.value("AlarmLogic/TrackAlreadyHasAlarmWindowMs", 60000).toInt();
+    m_alarmLogic.alarmFilterTtlMs = settings.value(QStringLiteral("AlarmLogic/AlarmFilterTtlMs"), 3600000).toInt();
     m_alarmLogic.speedDoubleCheckFuseTrackOnly = settings.value("AlarmLogic/SpeedDoubleCheckFuseTrackOnly", 1).toInt();
     m_alarmLogic.defaultThreatScore = settings.value("AlarmLogic/DefaultThreatScore", 90).toInt();
+
+    m_suspiciousTarget.enabled = settings.value(QStringLiteral("SuspiciousTarget/Enabled"), 0).toInt();
+    m_suspiciousTarget.judgeIntervalMs = settings.value(QStringLiteral("SuspiciousTarget/JudgeIntervalMs"), 5000).toInt();
+    m_suspiciousTarget.speedLowThresholdMps =
+        settings.value(QStringLiteral("SuspiciousTarget/SpeedLowThresholdMps"), 3.0).toDouble();
+    m_suspiciousTarget.speedHighThresholdMps =
+        settings.value(QStringLiteral("SuspiciousTarget/SpeedHighThresholdMps"), 8.0).toDouble();
+    m_suspiciousTarget.protectAngleMaxDeg =
+        settings.value(QStringLiteral("SuspiciousTarget/ProtectAngleMaxDeg"), 30.0).toDouble();
+    m_suspiciousTarget.speedCheckClearIntervalMin =
+        settings.value(QStringLiteral("SuspiciousTarget/SpeedCheckClearIntervalMin"), 30).toInt();
+    m_suspiciousTarget.ddsTopic = settings.value(
+        QStringLiteral("SuspiciousTarget/DdsTopic"), QStringLiteral("NewTrackStructSuspicious")).toString();
+    if (m_suspiciousTarget.judgeIntervalMs < 1000) {
+        m_suspiciousTarget.judgeIntervalMs = 1000;
+    }
+    qInfo() << "SuspiciousTarget 配置: enabled=" << m_suspiciousTarget.enabled
+            << "intervalMs=" << m_suspiciousTarget.judgeIntervalMs
+            << "speedLow=" << m_suspiciousTarget.speedLowThresholdMps
+            << "speedHigh=" << m_suspiciousTarget.speedHighThresholdMps
+            << "angleMax=" << m_suspiciousTarget.protectAngleMaxDeg
+            << "topic=" << m_suspiciousTarget.ddsTopic;
 
     const bool grpcEnabled = settings.value(QStringLiteral("GrpcAlarm/Enabled"), 1).toInt() != 0;
     const QString grpcHost = settings.value(QStringLiteral("GrpcAlarm/Host"), QStringLiteral("192.168.18.141")).toString();

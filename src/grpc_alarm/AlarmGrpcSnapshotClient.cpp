@@ -132,14 +132,10 @@ AlarmItem buildAlarmItem(const AlarmData& alarmData, CustomConfig* cfg, const QS
 
 bool passesTrackFilter(const AlarmData& alarmData, CustomConfig* cfg)
 {
-    if (!cfg->m_mapAlarmRule.contains(alarmData.condition_id)) {
+    if (cfg == nullptr) {
         return true;
     }
-    const int ruleTrackType = cfg->m_mapAlarmRule.value(alarmData.condition_id).track_type;
-    const int apiType = (ruleTrackType > 0) ? 1 : 0;
-    QMutexLocker filterLocker(&cfg->m_alarmFilterMutex);
-    return !cfg->m_listAlarmFilter.contains(
-        qMakePair(apiType, static_cast<qint64>(alarmData.unique_id)));
+    return !cfg->isUniqueIdAlarmFiltered(static_cast<qint64>(alarmData.unique_id));
 }
 
 qint64 resolveGrpcTargetUniqueId(const AlarmData& alarmData, CustomConfig* /*cfg*/, int /*ruleTrackType*/)
@@ -342,16 +338,11 @@ bool AlarmGrpcSnapshotClient::pushSnapshot(CustomConfig* cfg)
 
         for (auto it = cfg->m_mapManualAlarmData.constBegin(); it != cfg->m_mapManualAlarmData.constEnd(); ++it) {
             const AlarmData& alarmData = it.value();
+            if (!passesTrackFilter(alarmData, cfg)) {
+                continue;
+            }
             const bool isAirTrack = cfg->m_mapManualAlarmAirTrack.value(
                 static_cast<qint64>(alarmData.unique_id), false);
-            const int apiType = isAirTrack ? 1 : 0;
-            {
-                QMutexLocker filterLocker(&cfg->m_alarmFilterMutex);
-                if (cfg->m_listAlarmFilter.contains(
-                        qMakePair(apiType, static_cast<qint64>(alarmData.unique_id)))) {
-                    continue;
-                }
-            }
 
             const qint64 timeAlarmMs =
                 QDateTime::fromString(alarmData.time, QStringLiteral("yyyy-MM-dd hh:mm:ss.zzz")).toMSecsSinceEpoch();

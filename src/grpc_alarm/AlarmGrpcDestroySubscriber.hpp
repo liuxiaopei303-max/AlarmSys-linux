@@ -11,7 +11,7 @@
 
 class CustomConfig;
 
-/** 订阅 NexusUI destroy gRPC，收到灭告警事件后写入 m_listAlarmFilter（等同 HTTP /api/alarm_filter） */
+/** 订阅 NexusUI destroy gRPC，收到灭告警事件后写入 m_mapAlarmFilterExpireMs（等同 HTTP /api/alarm_filter） */
 class AlarmGrpcDestroySubscriber
 {
 public:

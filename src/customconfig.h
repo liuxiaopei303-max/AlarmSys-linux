@@ -261,6 +261,7 @@ private:
 public:
     BasicConfig m_struBasicConfig;   //配置-基础配置
     AlarmLogicConfig m_alarmLogic;   //配置-航迹告警逻辑（Config.ini [AlarmLogic]）
+    SuspiciousTargetConfig m_suspiciousTarget; /**< 可疑目标研判（Config.ini [SuspiciousTarget]） */
     OtherConfig m_struOtherConfig;//配置-其他配置
     UrlConfig m_struUrlConfig{};
     int m_nRatio; //0-1080；1-2160
@@ -310,6 +311,10 @@ public:
     QMap<QString, QList<AlarmIdentificationRuleSub>> m_mapAlarmIdentificationRulesSub;
     /** "group_id_area_id" -> 该区域绑定的识别 rule_id 列表（不同 rule 鉴定为并集） */
     QMap<QString, QStringList> m_mapAreaKeyToIdentificationRuleIds;
+    /** 激活 scheme 下区域查证 rule_id 绑定 */
+    QMap<QString, QStringList> m_mapAreaKeyToVerificationRuleIds;
+    /** 激活 scheme 下区域处置规则绑定 */
+    QMap<QString, QList<AreaHandleRuleBinding>> m_mapAreaKeyToHandleRules;
     /** detection_rules 鉴定首次 VERIFY_SUCCESS 的 resolvedTime（按 alarm_id，仅写一次） */
     QMap<QString, QString> m_mapAlarmIdentificationResolvedTime;
     /** HTTP 确认告警：unique_id 集合，SendAllAlarmEventMsg 直接置 VERIFY_SUCCESS */
@@ -331,7 +336,8 @@ public:
     QMap<QString, QString> m_mapAlarmDescription; //告警详细信息
     QMutex m_alarmDataMutex;
     QMutex m_alarmFilterMutex;
-    QList<QPair<int, qint64>> m_listAlarmFilter; // (type, target_id) type: 0-对海 1-对空
+    /** 灭告警 filter：(type, unique_id) -> 过期时刻 ms；type 0=对海 1=对空 */
+    QMap<QPair<int, qint64>, qint64> m_mapAlarmFilterExpireMs;
     QMutex m_vTargetPicMutex;
     bool m_useCheckAlarmCamera = false;
     bool m_useCameraCheckTrack = false;
@@ -389,6 +395,8 @@ public:
     AlarmEventSubscriberApp* m_alarmeventSubscriber = nullptr;
     NewTrackStructAlarmPublisherApp* m_newTrackStructAlarmPublisherMulti = nullptr;
     NewTrackStructAlarmPublisherApp* m_newTrackStructAlarmPublisherSingle = nullptr;
+    NewTrackStructAlarmPublisherApp* m_suspiciousTargetPublisherMulti = nullptr;
+    NewTrackStructAlarmPublisherApp* m_suspiciousTargetPublisherSingle = nullptr;
     NewTrackStructSubscriberApp* m_newTrackStructSubscriber = nullptr;
     TrackClassSubscriberApp* m_trackSubscriber = nullptr;
     FastddsRecognitionPublisherApp* m_recognitionPublisher = nullptr;
@@ -443,10 +451,15 @@ public:
     void startAlarmDestroyGrpcSubscriber();
     void stopAlarmDestroyGrpcSubscriber();
     void SendNewTrackStructAlarmMsg(const AlarmEvent* alarmEvent = nullptr);
+    /** 发布可疑目标 TargetOutputSet（不写库、不走 AlarmEvent） */
+    /** @return 实际写入 DDS 的目标数，0 表示未发送 */
+    int SendSuspiciousTargetMsg(const QSet<QString>& suspiciousUniqueIds);
     /** true：完整组装并发布（SendAllAlarmEventMsg 全逻辑）；false：仅向 DDS 发空 AlarmEvent，不做全量告警组装 */
     bool alarmEventPushFullEnabled() const;
     void setAlarmEventPushFullEnabled(bool on);
-    void addAlarmFilter(int type, qint64 targetId); // type: 0-对海 1-对空，target_id 为 NewTrack DDS 全局 ID
+    void addAlarmFilter(int type, qint64 targetId); // type: 0-对海 1-对空，target_id 为 unique_id
+    /** 该 unique_id 是否已被灭告警（对海/对空任一 type 命中即视为已过滤） */
+    bool isUniqueIdAlarmFiltered(qint64 uniqueId);
     /** 人工确认告警：按 unique_id 标记，后续 SendAllAlarmEventMsg 直接 VERIFY_SUCCESS */
     bool confirmAlarmByUniqueId(qint64 uniqueId, QString* outMessage = nullptr);
     /** 规则告警：task_status + 鉴定/人工确认升级（DDS 与 gRPC 共用） */
@@ -455,10 +468,14 @@ public:
 
     // 威胁度参数相关方法
     ThreatAssessmentParams getThreatAssessmentParams(int groupId, int areaId);
+    /** HTTP 热更新：按 scope 从库重载内存配置（scope 见 AlarmHttpServer） */
+    void reloadAlarmConfigFromDb(const QString& scope = QStringLiteral("all"));
 
 signals:
     void sig_initfastddsFinished();
 private:
+    void pruneExpiredAlarmFiltersLocked(qint64 nowMs);
+    void removeAlarmFilterForUniqueId(qint64 uniqueId);
     mutable QMutex m_alarmEventPushModeMutex;
     bool m_bAlarmEventPushFullEnabled = true;
     string m_configPath;

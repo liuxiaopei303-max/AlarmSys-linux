@@ -35,6 +35,7 @@ set(ALARM_SOURCES
     "${ALARM_SRC_DIR}/customconfig.cpp"
     "${ALARM_SRC_DIR}/common/commonfunc.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/TrackAlarmThread.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/SuspiciousTargetThread.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AlarmFileLogger.cpp"
     "${ALARM_SRC_DIR}/db/DataAccessLayer.cpp"
     "${ALARM_SRC_DIR}/db/DatabaseManager.cpp"
