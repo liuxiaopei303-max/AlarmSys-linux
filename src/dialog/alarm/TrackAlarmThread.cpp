@@ -840,7 +840,7 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 			else if (passFilter) {
 				int lastCalculatedThreatScore = al.defaultThreatScore;
 				// 若该航迹此前已有告警（同规则、同航迹且在有效期内），则即使当前速度/方位不满足也持续告警
-				bool trackAlreadyHasAlarm = false; 
+				bool trackAlreadyHasAlarm = false;  
 				{
 					QMutexLocker locker(&gConfig->m_alarmDataMutex);
 					for (QMap<QString, AlarmData>::iterator itA = gConfig->m_mapAlarmData.begin(); itA != gConfig->m_mapAlarmData.end(); ++itA) {
