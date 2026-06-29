@@ -108,6 +108,17 @@ QString birdSkipIdsToString(const QSet<int>& ids)
 	return parts.join(QLatin1Char(','));
 }
 
+/** 若 fusion.trackID[0..7] 任一在 birdSkipTrackIds 中则返回该 id，否则返回 0 */
+int findBirdSkipFusionTrackId(const SPxPacketTrackExtended& tr, const QSet<int>& skipIds)
+{
+	for (int i = 0; i < 8; ++i) {
+		const int tid = static_cast<int>(tr.fusion.trackID[i]);
+		if (tid > 0 && skipIds.contains(tid))
+			return tid;
+	}
+	return 0;
+}
+
 void logBirdAreaCandidate(qint64 mapKey, const SPxPacketTrackExtended& tr, const QString& conditionId)
 {
 	logAlarmTraceThrottled(
@@ -670,8 +681,9 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 				{
 					const int fusionTid0 = static_cast<int>(track.fusion.trackID[0]);
 					const int fusionTid1 = static_cast<int>(track.fusion.trackID[1]);
+					const int skipFusionTid = findBirdSkipFusionTrackId(track, al.birdSkipTrackIds);
 					const bool radarMatch = (radarSourceId == al.birdRadarSourceId);
-					const bool inSkipList = al.birdSkipTrackIds.contains(fusionTid0);
+					const bool inSkipList = (skipFusionTid > 0);
 					logAlarmTraceThrottled(
 						QStringLiteral("bird_filter_chk_%1_%2").arg(info.condition_id).arg(candidateTrackId),
 						QStringLiteral("birdFilterCheck------mapKey:%1 normId:%2 fusionTid0:%3 fusionTid1:%4 sensors:%5 reserved1:%6 radarSrc:%7 cfgBirdRadarSrc:%8 radarMatch:%9 inSkipList:%10 conditionId:%11")
@@ -700,18 +712,18 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 					}
 				}
 				if (radarSourceId == al.birdRadarSourceId) {
-					// 对空融合(type==3, radarSourceId=9)：自报位 fusion.trackID[0] 在黑名单则跳过
-					const int fusionTid = static_cast<int>(track.fusion.trackID[0]);
-					if (al.birdSkipTrackIds.contains(fusionTid)) {
+					// 对空融合(type==3, radarSourceId=9)：fusion.trackID[0..7] 任一在黑名单则跳过
+					const int skipFusionTid = findBirdSkipFusionTrackId(track, al.birdSkipTrackIds);
+					if (skipFusionTid > 0) {
 						logAlarmTrace(
 							QStringLiteral("updataAlarmTrackToDB skip------trackId:%1 normId:%2 reason:bird_skip_fusion_id fusionTid:%3 conditionId:%4")
 								.arg(candidateTrackId)
 								.arg(track.norm.min.id)
-								.arg(fusionTid)
+								.arg(skipFusionTid)
 								.arg(info.condition_id));
 						continue;
 					}
-					if (fusionTid == 0) {
+					if (static_cast<int>(track.fusion.trackID[0]) == 0) {
 						logAlarmTraceThrottled(
 							QStringLiteral("bird_filter_fusion0_%1").arg(candidateTrackId),
 							QStringLiteral("birdFilterNoSkip fusionTid0=0------mapKey:%1 normId:%2 sensors:%3 conditionId:%4")
@@ -772,12 +784,21 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 					? static_cast<int>(targetId)
 					: 0;
 
-			// 免告警区：位于 NoAlarmGroupId（默认 group_id=1）内且无已发布告警则跳过；已有告警则持续
+			// 免告警区：位于 NoAlarmGroupIdList 指定 group 内且无已发布告警则跳过；已有告警则持续
 			{
 				const AlarmLogicConfig& alNoAlarm = gConfig->m_alarmLogic;
-				if (alNoAlarm.noAlarmGroupId >= 0) {
+				if (!alNoAlarm.noAlarmGroupIds.isEmpty()) {
 					const QPointF ptNoAlarm(track.latDegs, track.longDegs);
-					if (isTrackInGroupAreaByGroupId(ptNoAlarm, alNoAlarm.noAlarmGroupId)) {
+					int matchedNoAlarmGroupId = -1;
+					for (int gid : alNoAlarm.noAlarmGroupIds) {
+						if (gid < 0)
+							continue;
+						if (isTrackInGroupAreaByGroupId(ptNoAlarm, gid)) {
+							matchedNoAlarmGroupId = gid;
+							break;
+						}
+					}
+					if (matchedNoAlarmGroupId >= 0) {
 						const bool hasPublished = trackHasPublishedAlarm(
 							gConfig, targetId, alNoAlarm.trackAlreadyHasAlarmWindowMs);
 						if (!hasPublished) {
@@ -785,7 +806,7 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 								QStringLiteral("upd_skip_noalarm_%1_%2").arg(targetId).arg(info.condition_id),
 								QStringLiteral("updataAlarmTrackToDB skip------targetId:%1 reason:no_alarm_group groupId:%2 conditionId:%3")
 									.arg(targetId)
-									.arg(alNoAlarm.noAlarmGroupId)
+									.arg(matchedNoAlarmGroupId)
 									.arg(info.condition_id),
 								10000);
 							continue;
@@ -794,7 +815,7 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 							QStringLiteral("upd_noalarm_keep_%1").arg(targetId),
 							QStringLiteral("updataAlarmTrackToDB no_alarm_zone_keep------targetId:%1 groupId:%2 hasPublishedAlarm:1 conditionId:%3")
 								.arg(targetId)
-								.arg(alNoAlarm.noAlarmGroupId)
+								.arg(matchedNoAlarmGroupId)
 								.arg(info.condition_id),
 							30000);
 					}

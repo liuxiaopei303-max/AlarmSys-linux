@@ -117,7 +117,7 @@ struct AlarmLogicConfig {
     QString birdSelfReportSubstrings = QStringLiteral("自报位"); /**< 逗号分隔，任一子串命中则跳过（birdFilterMode=0） */
     QSet<int> birdSkipTrackIds;             /**< birdFilterMode=1 时跳过这些融合 trackID */
     QSet<int> areaGroupIdAllow;             /**< isTrackInGroupArea 允许的 groupID，空=不限制 */
-    int noAlarmGroupId = 1;                 /**< 免告警区 group_id；-1 表示关闭免告警区判定 */
+    QSet<int> noAlarmGroupIds;              /**< 免告警区 group_id 列表，空=关闭免告警区判定 */
     int fuseMapRequireContain = 1;          /**< 1=融合航迹必须在 m_mapFuseTrack 中存在（原 Linux） */
     int trackAlreadyHasAlarmWindowMs = 60000; /**< “持续告警”判定窗口 */
     int alarmFilterTtlMs = 3600000;         /**< 灭告警 filter 存续时间（毫秒），默认 1 小时 */
@@ -1971,12 +1971,14 @@ struct AlarmIdentificationRuleSub {
     QDateTime updated_at;
 };
 
-/** 区域处置规则绑定 area_handle_rules（激活方案下按区域） */
+/** 区域处置规则绑定 area_handle_rules（激活 scheme 下 group_id + area_id 关联的处置方案） */
 struct AreaHandleRuleBinding {
-    QString handleSchemeId;
-    QString handleSchemeName;
+    int id = 0;
+    QString handle_scheme_id;
+    QString handle_scheme_name;
     int priority = 0;
     bool enabled = true;
+    QDateTime created_at;
 };
 
 //告警数据结构体

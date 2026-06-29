@@ -184,9 +184,9 @@ public:
     bool hasMinioMultiMetadataForUniqueId(qint64 uniqueId, const QString& fileNameLikePattern);
     /** 当前激活 scheme 下 area_identification_rules：key 为 "group_id_area_id"，value 为去重后的 rule_id 列表（用于规则并集） */
     QMap<QString, QStringList> getIdentificationRuleIdsByAreaForActiveScheme();
-    /** 当前激活 scheme 下 area_verification_rules：key 为 "group_id_area_id"，value 为查证 rule_id 列表 */
+    /** 当前激活 scheme 下 area_verification_rules：key 为 "group_id_area_id"，value 为去重后的 rule_id 列表 */
     QMap<QString, QStringList> getVerificationRuleIdsByAreaForActiveScheme();
-    /** 当前激活 scheme 下 area_handle_rules：key 为 "group_id_area_id" */
+    /** 当前激活 scheme 下 area_handle_rules：key 为 "group_id_area_id"，value 为处置规则绑定列表（按 priority 排序） */
     QMap<QString, QList<AreaHandleRuleBinding>> getAreaHandleRulesByAreaForActiveScheme();
     QMap<int, TargetInfoFilter> getTargetInfoFilter();
     QMap<QString, AlarmData> getAlarmData();

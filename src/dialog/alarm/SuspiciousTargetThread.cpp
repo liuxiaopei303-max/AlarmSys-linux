@@ -139,6 +139,52 @@ bool isAirDroneTrack(const SPxPacketTrackExtended& track)
     return track.norm.min.reserved1 == kAirDroneReserved1;
 }
 
+/** 与 TrackAlarmThread 一致：fusion.trackID[0..7] 任一在 birdSkipTrackIds 中则返回该 id */
+int findBirdSkipFusionTrackId(const SPxPacketTrackExtended& tr, const QSet<int>& skipIds)
+{
+    for (int i = 0; i < 8; ++i) {
+        const int tid = static_cast<int>(tr.fusion.trackID[i]);
+        if (tid > 0 && skipIds.contains(tid))
+            return tid;
+    }
+    return 0;
+}
+
+bool isBirdSelfReportSensorFiltered(const SPxPacketTrackExtended& track, const AlarmLogicConfig& al)
+{
+    if (al.birdFilterMode != 0)
+        return false;
+
+    QString res;
+    const unsigned int sensorType = track.fusion.sensors;
+    for (int si = 0; si < 3; ++si) {
+        if (sensorType >> si & 0X01) {
+            switch (si) {
+            case 0:  res += QStringLiteral("14S雷达 "); break;
+            case 1:  res += QStringLiteral("四创雷达 "); break;
+            case 2:  res += QStringLiteral("自报位 "); break;
+            default: break;
+            }
+        }
+    }
+
+    const QStringList subs = al.birdSelfReportSubstrings.split(QLatin1Char(','), QString::SkipEmptyParts);
+    for (const QString& sub : subs) {
+        const QString t = sub.trimmed();
+        if (!t.isEmpty() && res.contains(t))
+            return true;
+    }
+    return false;
+}
+
+/** 鸟情自报位过滤命中时不标可疑（与告警 bird_skip 逻辑对齐） */
+bool shouldSkipBirdAirTrackForSuspicious(const SPxPacketTrackExtended& track, const AlarmLogicConfig& al)
+{
+    if (findBirdSkipFusionTrackId(track, al.birdSkipTrackIds) > 0)
+        return true;
+    return isBirdSelfReportSensorFiltered(track, al);
+}
+
 } // namespace
 
 SuspiciousTargetThread::SuspiciousTargetThread(QObject* parent)
@@ -323,9 +369,17 @@ void SuspiciousTargetThread::processSuspiciousTargets()
             &suspiciousIds);
     }
 
+    const AlarmLogicConfig& alBird = gConfig->m_alarmLogic;
     int airDroneCount = 0;
+    int airBirdFilteredCount = 0;
     for (auto it = airFuseTrackMap.constBegin(); it != airFuseTrackMap.constEnd(); ++it) {
         if (!isAirDroneTrack(it.value())) {
+            continue;
+        }
+        if (shouldSkipBirdAirTrackForSuspicious(it.value(), alBird)) {
+            ++airBirdFilteredCount;
+            m_mapSpeedLowLastCheckAir.remove(it.key());
+            m_mapSpeedHighLastCheckAir.remove(it.key());
             continue;
         }
         ++airDroneCount;
@@ -345,6 +399,7 @@ void SuspiciousTargetThread::processSuspiciousTargets()
                  << "ddsSent=" << sentCount
                  << "seaFuse=" << seaFuseTrackMap.size()
                  << "airDrone=" << airDroneCount
+                 << "airBirdFiltered=" << airBirdFilteredCount
                  << "topic=" << cfg.ddsTopic;
     }
 }

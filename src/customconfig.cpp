@@ -1850,7 +1850,16 @@ void CustomConfig::LoadConfig()
         parseIntSetFromSettings(settings, QStringLiteral("AlarmLogic/AreaGroupIdAllowList"), &m_alarmLogic.areaGroupIdAllow);
     if (m_alarmLogic.areaGroupIdAllow.isEmpty())
         parseCsvIntSet(QStringLiteral("1,2"), &m_alarmLogic.areaGroupIdAllow);
-    m_alarmLogic.noAlarmGroupId = settings.value(QStringLiteral("AlarmLogic/NoAlarmGroupId"), 1).toInt();
+    if (settings.contains(QStringLiteral("AlarmLogic/NoAlarmGroupIdList"))) {
+        parseIntSetFromSettings(settings, QStringLiteral("AlarmLogic/NoAlarmGroupIdList"), &m_alarmLogic.noAlarmGroupIds);
+    } else if (settings.contains(QStringLiteral("AlarmLogic/NoAlarmGroupId"))) {
+        const int legacyNoAlarmGroupId = settings.value(QStringLiteral("AlarmLogic/NoAlarmGroupId")).toInt();
+        m_alarmLogic.noAlarmGroupIds.clear();
+        if (legacyNoAlarmGroupId >= 0)
+            m_alarmLogic.noAlarmGroupIds.insert(legacyNoAlarmGroupId);
+    } else {
+        parseCsvIntSet(QStringLiteral("1,2"), &m_alarmLogic.noAlarmGroupIds);
+    }
     m_alarmLogic.fuseMapRequireContain = settings.value("AlarmLogic/FuseMapRequireContain", 1).toInt();
     m_alarmLogic.trackAlreadyHasAlarmWindowMs = settings.value("AlarmLogic/TrackAlreadyHasAlarmWindowMs", 60000).toInt();
     m_alarmLogic.alarmFilterTtlMs = settings.value(QStringLiteral("AlarmLogic/AlarmFilterTtlMs"), 3600000).toInt();

@@ -1770,21 +1770,26 @@ QMap<QString, QList<AreaHandleRuleBinding>> DataAccessLayer::getAreaHandleRulesB
     QMap<QString, QList<AreaHandleRuleBinding>> map;
     const QString schemeId = getActiveSchemeId();
     const QString query =
-        "SELECT group_id, area_id, handle_scheme_id, handle_scheme_name, priority, enabled "
+        "SELECT id, group_id, area_id, handle_scheme_id, handle_scheme_name, priority, enabled, created_at "
         "FROM area_handle_rules "
         "WHERE scheme_id = ? AND COALESCE(enabled, true) = true "
-        "ORDER BY group_id, area_id, priority ASC, handle_scheme_id";
+        "ORDER BY group_id, area_id, priority ASC, created_at ASC";
     QSqlQuery result = m_dbManager.executeQuery(query, { schemeId });
     while (result.next()) {
-        AreaHandleRuleBinding row;
-        row.handleSchemeId = result.value(QStringLiteral("handle_scheme_id")).toString();
-        row.handleSchemeName = result.value(QStringLiteral("handle_scheme_name")).toString();
-        row.priority = result.value(QStringLiteral("priority")).toInt();
-        QVariant en = result.value(QStringLiteral("enabled"));
-        row.enabled = en.isNull() ? true : en.toBool();
         const int g = result.value(QStringLiteral("group_id")).toInt();
         const int a = result.value(QStringLiteral("area_id")).toInt();
         const QString k = QString::number(g) + QLatin1Char('_') + QString::number(a);
+        AreaHandleRuleBinding row;
+        row.id = result.value(QStringLiteral("id")).toInt();
+        row.handle_scheme_id = result.value(QStringLiteral("handle_scheme_id")).toString();
+        row.handle_scheme_name = result.value(QStringLiteral("handle_scheme_name")).toString();
+        row.priority = result.value(QStringLiteral("priority")).toInt();
+        row.enabled = result.value(QStringLiteral("enabled")).isNull()
+            ? true
+            : result.value(QStringLiteral("enabled")).toBool();
+        const QVariant ct = result.value(QStringLiteral("created_at"));
+        if (!ct.isNull())
+            row.created_at = ct.toDateTime();
         map[k].append(row);
     }
     return map;
