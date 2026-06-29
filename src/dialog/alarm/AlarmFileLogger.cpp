@@ -12,7 +12,7 @@
 namespace {
 QMutex& alarmLogMutex()
 {
-    static QMutex m;
+    static QMutex m; 
     return m; 
 }
 
