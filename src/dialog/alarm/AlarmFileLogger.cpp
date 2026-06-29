@@ -13,7 +13,7 @@ namespace {
 QMutex& alarmLogMutex()
 {
     static QMutex m;
-    return m;
+    return m; 
 }
 
 QString alarmLogDir()
