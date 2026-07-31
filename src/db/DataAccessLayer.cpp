@@ -2,6 +2,7 @@
 
 #include "DataAccessLayer.h"
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QSqlQuery>
 #include <QSqlError>
 #include <QDebug>
@@ -43,6 +44,8 @@ DbInfo DataAccessLayer::loadDbParams()
     dbInfo.hostPort = settings.value("hostPort", 5432).toInt();
     dbInfo.userName = settings.value("userName", "postgres").toString();
     dbInfo.userPwd = settings.value("userPwd", "123456").toString();
+    // 0=Qt QPSQL；1=libpq（默认 1）
+    dbInfo.accessMode = settings.value("AccessMode", 1).toInt();
     settings.endGroup();
     return dbInfo;
 }
@@ -1723,6 +1726,41 @@ bool DataAccessLayer::hasMinioMultiMetadataForUniqueId(qint64 uniqueId, const QS
     return result.next();
 }
 
+DataAccessLayer::MinioMetadataResult DataAccessLayer::getLatestMinioMetadataByUniqueId(qint64 uniqueId)
+{
+    MinioMetadataResult out;
+    if (uniqueId <= 0)
+        return out;
+    const QString query =
+        "SELECT minio_bucket, minio_object_key, download_url, camera_index, file_name, uploaded_at "
+        "FROM minio_multi_metadata "
+        "WHERE \"unique_id\" = ? "
+        "AND minio_bucket IS NOT NULL AND trim(minio_bucket) <> '' "
+        "AND minio_object_key IS NOT NULL AND trim(minio_object_key) <> '' "
+        "ORDER BY uploaded_at DESC NULLS LAST "
+        "LIMIT 1";
+    QSqlQuery result = m_dbManager.executeQuery(query, { QVariant::fromValue(uniqueId) });
+    if (!result.next())
+        return out;
+    out.minioBucket = result.value(QStringLiteral("minio_bucket")).toString().trimmed();
+    out.minioObjectKey = result.value(QStringLiteral("minio_object_key")).toString().trimmed();
+    out.downloadUrl = result.value(QStringLiteral("download_url")).toString().trimmed();
+    out.cameraIndex = result.value(QStringLiteral("camera_index")).toString().trimmed();
+    out.fileName = result.value(QStringLiteral("file_name")).toString().trimmed();
+    const QVariant ua = result.value(QStringLiteral("uploaded_at"));
+    if (ua.canConvert<QDateTime>()) {
+        const QDateTime dt = ua.toDateTime();
+        if (dt.isValid()) {
+            out.uploadedAt = dt.toString(QStringLiteral("yyyy-MM-dd hh:mm:ss"));
+        }
+    }
+    if (out.uploadedAt.isEmpty()) {
+        out.uploadedAt = ua.toString().trimmed();
+    }
+    out.found = !out.minioBucket.isEmpty() && !out.minioObjectKey.isEmpty();
+    return out;
+}
+
 QMap<QString, QStringList> DataAccessLayer::getIdentificationRuleIdsByAreaForActiveScheme()
 {
     QMap<QString, QStringList> map;
@@ -2069,6 +2107,68 @@ DataAccessLayer::DetectionTypeResult DataAccessLayer::getDetectionTypesByReId(qi
         result.found = true;
     }
     return result;
+}
+
+bool DataAccessLayer::ensureFinalTypeSourceEnumValues()
+{
+    // enum 值已在库中创建；避免 ALTER TYPE 经 QPSQL prepare 破坏连接状态
+    return true;
+}
+
+QList<DataAccessLayer::CognitiveTypeJudgeRow> DataAccessLayer::fetchCognitiveTypeJudgeRows(
+    const QList<qint64>& uniqueIds)
+{
+    QList<CognitiveTypeJudgeRow> rows;
+    if (uniqueIds.isEmpty()) {
+        return rows;
+    }
+
+    QStringList placeholders;
+    QVariantList params;
+    placeholders.reserve(uniqueIds.size());
+    for (qint64 uniqueId : uniqueIds) {
+        placeholders.append(QStringLiteral("?"));
+        params.append(uniqueId);
+    }
+
+    const QString query = QStringLiteral(
+        "SELECT unique_id, "
+        "COALESCE(cam_target_type, ''), "
+        "COALESCE(NULLIF(track_target_type, ''), NULLIF(time_target_type, ''), ''), "
+        "COALESCE(llm_target_type, ''), "
+        "COALESCE(final_target_type, ''), "
+        "COALESCE(final_type_source::text, '') "
+        "FROM cognitive_results_comprehensive "
+        "WHERE unique_id IN (%1)").arg(placeholders.join(QLatin1Char(',')));
+
+    QSqlQuery sqlResult = m_dbManager.executeQuery(query, params);
+    while (sqlResult.next()) {
+        CognitiveTypeJudgeRow row;
+        row.uniqueId = sqlResult.value(0).toLongLong();
+        row.camTargetType = sqlResult.value(1).toString();
+        row.trackTargetType = sqlResult.value(2).toString();
+        row.llmTargetType = sqlResult.value(3).toString();
+        row.finalTargetType = sqlResult.value(4).toString();
+        row.finalTypeSource = sqlResult.value(5).toString();
+        rows.append(row);
+    }
+    return rows;
+}
+
+bool DataAccessLayer::updateFinalTargetTypeJudgement(
+    qint64 uniqueId,
+    const QString& finalType,
+    const QString& source)
+{
+    const QString query = QStringLiteral(
+        "UPDATE cognitive_results_comprehensive SET "
+        "final_target_type = ?, "
+        "final_type_source = ?::dict_source_enum, "
+        "observed_at = ? "
+        "WHERE unique_id = ?");
+    return m_dbManager.executeNonQuery(
+        query,
+        {finalType, source, QDateTime::currentDateTimeUtc(), uniqueId});
 }
 
 bool DataAccessLayer::updateAlarmStatus(QString id, int status)
@@ -2523,6 +2623,10 @@ QString DataAccessLayer::sourceEnumToString(SourceEnum source)
             return "manual";
         case SOURCE_ARCHIVE:
             return "archive";
+        case SOURCE_CAM:
+            return "cam";
+        case SOURCE_TRACK:
+            return "track";
         case SOURCE_UNKNOWN:
         default:
             return "llm";
@@ -2554,6 +2658,8 @@ SourceEnum DataAccessLayer::stringToSourceEnum(const QString& source)
     if (source == "radar") return SOURCE_RADAR;
     if (source == "manual") return SOURCE_MANUAL;
     if (source == "archive") return SOURCE_ARCHIVE;
+    if (source == "cam") return SOURCE_CAM;
+    if (source == "track") return SOURCE_TRACK;
     return SOURCE_UNKNOWN;
 }
 

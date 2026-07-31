@@ -10,6 +10,7 @@
 #include <QTcpSocket>
 #include <QUrl>
 #include <QUrlQuery>
+#include <QtMath>
 
 AlarmHttpServer::AlarmHttpServer(CustomConfig* cfg, QObject* parent)
     : QObject(parent)
@@ -84,7 +85,7 @@ bool AlarmHttpServer::start(quint16 port)
             return QStringLiteral("all");
         };
 
-        connect(clientSocket, &QTcpSocket::readyRead, this, [this, clientSocket, updateRule, parseReloadScope, sendHttpResponse]() {
+        auto handleClientRequest = [this, clientSocket, updateRule, parseReloadScope, sendHttpResponse]() {
             const QByteArray requestData = clientSocket->readAll();
             const QString requestString = QString::fromUtf8(requestData);
             const QStringList requestLines = requestString.split("\r\n");
@@ -280,8 +281,47 @@ bool AlarmHttpServer::start(quint16 port)
                     return;
                 }
 
+                CustomConfig::ManualConfirmTrackHint hint;
+                const auto readFiniteFloat = [&](const char* key, float* out) -> bool {
+                    const QJsonValue v = root.value(QLatin1String(key));
+                    if (!v.isDouble())
+                        return false;
+                    const double d = v.toDouble();
+                    if (!qIsFinite(d))
+                        return false;
+                    *out = static_cast<float>(d);
+                    return true;
+                };
+                float lat = 0.f, lon = 0.f;
+                const bool hasLat = readFiniteFloat("lat", &lat) || readFiniteFloat("latitude", &lat)
+                    || readFiniteFloat("targetlat", &lat);
+                const bool hasLon = readFiniteFloat("lon", &lon) || readFiniteFloat("lng", &lon)
+                    || readFiniteFloat("longitude", &lon) || readFiniteFloat("targetlon", &lon);
+                if (hasLat && hasLon) {
+                    hint.valid = true;
+                    hint.latDegs = lat;
+                    hint.lonDegs = lon;
+                    float speed = 0.f, course = 0.f;
+                    if (readFiniteFloat("speed", &speed) || readFiniteFloat("speedMps", &speed))
+                        hint.speedMps = speed;
+                    if (readFiniteFloat("course", &course) || readFiniteFloat("courseDeg", &course)
+                        || readFiniteFloat("heading", &course))
+                        hint.courseDeg = course;
+                    const QJsonValue airVal = root.value(QStringLiteral("isAirTrack"));
+                    if (airVal.isBool())
+                        hint.isAirTrack = airVal.toBool();
+                    else if (airVal.isDouble())
+                        hint.isAirTrack = airVal.toInt() != 0;
+                    else {
+                        const QJsonValue fuseVal = root.value(QStringLiteral("fuseType"));
+                        if (fuseVal.isDouble())
+                            hint.isAirTrack = fuseVal.toInt() == 1;
+                    }
+                }
+
                 QString msg;
-                const bool ok = m_cfg && m_cfg->confirmAlarmByUniqueId(uniqueId, &msg);
+                const bool ok = m_cfg
+                    && m_cfg->confirmAlarmByUniqueId(uniqueId, &msg, hint.valid ? &hint : nullptr);
                 QJsonObject resp;
                 resp[QStringLiteral("code")] = ok ? 0 : -1;
                 resp[QStringLiteral("message")] = msg;
@@ -301,7 +341,12 @@ bool AlarmHttpServer::start(quint16 port)
             }
 
             sendHttpResponse(clientSocket, 404, QStringLiteral("Not Found"), "{}");
-        });
+        };
+
+        connect(clientSocket, &QTcpSocket::readyRead, this, handleClientRequest);
+        if (clientSocket->bytesAvailable() > 0) {
+            handleClientRequest();
+        }
 
         connect(clientSocket, &QTcpSocket::disconnected, clientSocket, &QTcpSocket::deleteLater);
     });

@@ -1,6 +1,8 @@
 #include "customconfig.h"
+#include "dialog/alarm/AlarmContentBuilder.h"
 #include "grpc_alarm/AlarmGrpcSnapshotClient.hpp"
 #include "grpc_alarm/AlarmGrpcDestroySubscriber.hpp"
+#include "grpc_target_type/TargetTypeGrpcClient.hpp"
 #include <QSettings>
 #include <QDebug>
 #include <QTextCodec>
@@ -15,6 +17,7 @@
 #include <QFuture>
 #include <QCoreApplication>
 #include <QThread>
+#include <QTimer>
 #include <QReadLocker>
 #include <algorithm>
 #include <QJsonDocument>
@@ -23,9 +26,12 @@
 #include <QSet>
 #include <QDateTime>
 #include <limits>
+#include <cstring>
 #include "dialog/alarm/AlarmFileLogger.h"
 #include "fastdds_newtrack/NewTrackStructAlarmPublisherApp.hpp"
 #include "fastdds_newtrack/NewTrackStructSubscriberApp.hpp"
+#include "grpc_track/fusion_track_grpc_client.h"
+#include "grpc_track/new_track_struct_grpc_client.h"
 
 namespace {
 
@@ -209,10 +215,39 @@ UniqueTrackHit findTrackByUniqueId(CustomConfig* cfg, qint64 uniqueId)
             hit.found = true;
         }
     };
+    // map key 通常=target_id；若 key 与 secondary.uniqueID 不一致，再按 uniqueID 扫一遍
+    const auto scanBySecondaryUniqueId = [&](const QMap<qint64, SPxPacketTrackExtended>& trackMap, bool isAir) {
+        if (hit.found)
+            return;
+        for (auto it = trackMap.constBegin(); it != trackMap.constEnd(); ++it) {
+            if (static_cast<qint64>(it.value().secondary.uniqueID) == uniqueId) {
+                hit.track = it.value();
+                hit.isAirTrack = isAir;
+                hit.found = true;
+                return;
+            }
+        }
+    };
+    const auto scanBySecondaryUniqueIdInt = [&](const QMap<int, SPxPacketTrackExtended>& trackMap, bool isAir) {
+        if (hit.found || uniqueId > static_cast<qint64>(std::numeric_limits<int>::max()))
+            return;
+        for (auto it = trackMap.constBegin(); it != trackMap.constEnd(); ++it) {
+            if (static_cast<qint64>(it.value().secondary.uniqueID) == uniqueId) {
+                hit.track = it.value();
+                hit.isAirTrack = isAir;
+                hit.found = true;
+                return;
+            }
+        }
+    };
     tryMapQint64(cfg->m_mapBirdFuseTrack, true);
     tryMapInt(cfg->m_mapBirdRadarTrack, true);
     tryMapQint64(cfg->m_mapFuseTrack, false);
     tryMapInt(cfg->m_mapRadarTrack, false);
+    scanBySecondaryUniqueId(cfg->m_mapBirdFuseTrack, true);
+    scanBySecondaryUniqueIdInt(cfg->m_mapBirdRadarTrack, true);
+    scanBySecondaryUniqueId(cfg->m_mapFuseTrack, false);
+    scanBySecondaryUniqueIdInt(cfg->m_mapRadarTrack, false);
     return hit;
 }
 
@@ -238,7 +273,8 @@ AlarmData buildManualAlarmDataFromTrack(
     ad.targetspeed = track.norm.min.speedMps;
     ad.targetdir = track.norm.min.courseDegrees;
     ad.targetdist = track.norm.min.rangeMetres / 1852.0;
-    ad.targettype = static_cast<int>(track.norm.reserved3);
+    // reserved3 在融合航迹上是威胁分映射，不是目标类型；人工告警不从 reserved3 取 type/score
+    ad.targettype = existing ? existing->targettype : 0;
     ad.targetbehavior = 0;
     ad.time = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd hh:mm:ss.zzz"));
     ad.origintime = (existing && !existing->origintime.isEmpty())
@@ -247,9 +283,9 @@ AlarmData buildManualAlarmDataFromTrack(
     ad.alarm_status = 0;
     ad.task_status = 0;
     ad.alarm_count = existing ? existing->alarm_count + 1 : 1;
-    ad.threatScore = track.norm.reserved3 > 0
-        ? static_cast<int>(track.norm.reserved3)
-        : (existing ? existing->threatScore : defaultThreatScore);
+    ad.threatScore = qMax(
+        existing ? existing->threatScore : 0,
+        defaultThreatScore > 0 ? defaultThreatScore : 90);
     ad.threat_time_ms = existing && existing->threat_time_ms > 0
         ? existing->threat_time_ms
         : QDateTime::currentMSecsSinceEpoch();
@@ -286,6 +322,12 @@ void syncManualAlarmsBeforePublish(CustomConfig* cfg)
         updated.alarm_count = prev.alarm_count;
         updated.origintime = prev.origintime;
         updated.threat_time_ms = prev.threat_time_ms;
+        updated.alarm_content = buildManualAlarmContent(
+            cfg,
+            uniqueId,
+            hit.isAirTrack,
+            updated.targetspeed,
+            updated.targetdir);
         it.value() = updated;
         cfg->m_mapManualAlarmAirTrack.insert(uniqueId, hit.isAirTrack);
         ++it;
@@ -306,6 +348,7 @@ CustomConfig::CustomConfig()
 {
     m_alarmGrpcClient = std::make_unique<AlarmGrpcSnapshotClient>();
     m_alarmDestroyGrpcSubscriber = std::make_unique<AlarmGrpcDestroySubscriber>();
+    m_targetTypeGrpcClient = std::make_unique<TargetTypeGrpcClient>();
     LoadConfig();
 
     m_dbInitSuccess = dbHelper.initDatabase();
@@ -328,7 +371,57 @@ CustomConfig::CustomConfig()
 
 CustomConfig::~CustomConfig()
 {
+    stopGrpcSnapshotTimer();
     stopAlarmDestroyGrpcSubscriber();
+}
+
+void CustomConfig::startGrpcSnapshotTimer()
+{
+    if (m_grpcSnapshotThread != nullptr) {
+        return;
+    }
+    if (!m_alarmGrpcClient || !m_alarmGrpcClient->isEnabled()) {
+        qInfo() << "GrpcSnapshotTimer: gRPC 告警快照未启用，跳过独立线程启动";
+        return;
+    }
+
+    m_grpcSnapshotThread = new QThread(this);
+    QTimer* timer = new QTimer();   // 无 parent，随后移入线程
+    timer->setInterval(1000);
+    timer->moveToThread(m_grpcSnapshotThread);
+
+    // 线程启动后立即开始计时
+    QObject::connect(m_grpcSnapshotThread, &QThread::started, timer,
+                     [timer]() { timer->start(); });
+
+    // 每秒触发：在 m_grpcSnapshotThread 线程中执行（DirectConnection）
+    // tickAlarmGrpcSnapshot 内部已持有 m_alarmDataMutex，线程安全
+    QObject::connect(timer, &QTimer::timeout, this,
+                     [this]() { tickAlarmGrpcSnapshot(); },
+                     Qt::DirectConnection);
+
+    // 线程结束时清理 timer
+    QObject::connect(m_grpcSnapshotThread, &QThread::finished,
+                     timer, &QObject::deleteLater);
+
+    m_grpcSnapshotThread->setObjectName(QStringLiteral("GrpcSnapshot"));
+    m_grpcSnapshotThread->start();
+    qInfo() << "GrpcSnapshotTimer: 独立推送线程已启动（与 processAlarms 解耦）";
+}
+
+void CustomConfig::stopGrpcSnapshotTimer()
+{
+    if (m_grpcSnapshotThread == nullptr) {
+        return;
+    }
+    m_grpcSnapshotThread->quit();
+    if (!m_grpcSnapshotThread->wait(3000)) {
+        qWarning() << "GrpcSnapshotTimer: 线程未在 3s 内退出，强制终止";
+        m_grpcSnapshotThread->terminate();
+        m_grpcSnapshotThread->wait(1000);
+    }
+    m_grpcSnapshotThread = nullptr;
+    qInfo() << "GrpcSnapshotTimer: 独立推送线程已停止";
 }
 
 void CustomConfig::CleanupDDSResources(int domainId)
@@ -450,12 +543,18 @@ void CustomConfig::InitFastdds()
         m_alarmevnetPublisherSingle = nullptr;
     }
 
-    // 航迹订阅：老 TrackDataClass / 新 NewTrackStruct 由 Config.ini [DDS]/TrackEnableOldSubscriber 控制
+    // 航迹订阅：FusionTrackTransport / RadarTrackTransport = dds|grpc
     const int trackEnableOldSubscriber =
         QSettings(QStringLiteral("Config.ini"), QSettings::IniFormat)
             .value(QStringLiteral("DDS/TrackEnableOldSubscriber"), 1)
             .toInt();
-    if (trackEnableOldSubscriber != 0) {
+    const QString fusionTx = m_struBasicConfig.m_strFusionTrackTransport.trimmed().toLower();
+    const QString radarTx = m_struBasicConfig.m_strRadarTrackTransport.trimmed().toLower();
+    const bool fusionUseGrpc = (fusionTx == QStringLiteral("grpc"));
+    const bool radarUseGrpc = (radarTx == QStringLiteral("grpc"));
+
+    // 旧 TrackDataClass：仅在雷达仍走 DDS 且显式开启时启动（避免与 FusionTrack gRPC 双点）
+    if (trackEnableOldSubscriber != 0 && !radarUseGrpc) {
         try {
             m_trackSubscriber = new TrackClassSubscriberApp(trackDDSPort);
             std::thread trackThread(&TrackClassApplication::run, m_trackSubscriber);
@@ -463,21 +562,62 @@ void CustomConfig::InitFastdds()
             qDebug() << "TrackClassSubscriber 已启用 domain=" << trackDDSPort;
         }
         catch (std::exception& e) {
-            qDebug() << "TrackClassSubscriber 初始化失败:" << e.what();
+            qWarning() << "TrackClassSubscriber 初始化失败:" << e.what();
             m_trackSubscriber = nullptr;
         }
+    } else if (trackEnableOldSubscriber != 0 && radarUseGrpc) {
+        qInfo() << "TrackClassSubscriber 已跳过（RadarTrackTransport=grpc）";
     } else {
-        qDebug() << "TrackClassSubscriber 已禁用，航迹数据由 NewTrackStruct 订阅写入";
+        qDebug() << "TrackClassSubscriber 已禁用";
     }
 
-    // 初始化 NewTrackStruct 订阅与告警发布（复用当前航迹域 ID）
+    // 融合：gRPC 或 DDS（告警 NewTrackStruct 发布者始终走 DDS）
+    if (fusionUseGrpc) {
+        try {
+            m_newTrackStructGrpcClient =
+                new NewTrackStructGrpcClient(m_struBasicConfig.m_strNewTrackStructGrpcAddr);
+            m_newTrackStructGrpcClient->start();
+            qInfo() << "融合航迹通道 FusionTrackTransport=grpc →"
+                    << m_struBasicConfig.m_strNewTrackStructGrpcAddr;
+        } catch (std::exception& e) {
+            qWarning() << "NewTrackStructGrpcClient 启动失败:" << e.what();
+            m_newTrackStructGrpcClient = nullptr;
+        }
+    } else {
+        try {
+            m_newTrackStructSubscriber = new NewTrackStructSubscriberApp(trackDDSPort);
+            qInfo() << "融合航迹通道 FusionTrackTransport=dds domain=" << trackDDSPort;
+        } catch (std::exception& e) {
+            qWarning() << "NewTrackStructSubscriber 初始化失败:" << e.what();
+            m_newTrackStructSubscriber = nullptr;
+        }
+    }
+
     try {
-        m_newTrackStructSubscriber = new NewTrackStructSubscriberApp(trackDDSPort);
         m_newTrackStructAlarmPublisherMulti = new NewTrackStructAlarmPublisherApp(trackDDSPort, 0);
         m_newTrackStructAlarmPublisherSingle = new NewTrackStructAlarmPublisherApp(trackDDSPort, 1);
     }
     catch (std::exception& e) {
-        qDebug() << "NewTrackStruct DDS初始化失败:" << e.what();
+        qDebug() << "NewTrackStruct 告警发布者初始化失败:" << e.what();
+    }
+
+    if (radarUseGrpc) {
+        try {
+            m_fusionTrackGrpcClient =
+                new FusionTrackGrpcClient(m_struBasicConfig.m_strFusionTrackStreamGrpcAddr);
+            m_fusionTrackGrpcClient->start();
+            qInfo() << "雷达航迹通道 RadarTrackTransport=grpc →"
+                    << m_struBasicConfig.m_strFusionTrackStreamGrpcAddr
+                    << "(yuan_yao/jing_zi_tou → m_mapRadarTrack)";
+        } catch (std::exception& e) {
+            qWarning() << "FusionTrackGrpcClient 启动失败:" << e.what();
+            m_fusionTrackGrpcClient = nullptr;
+        }
+    } else {
+        qInfo() << "雷达航迹通道 RadarTrackTransport=dds"
+                << (trackEnableOldSubscriber != 0 && !radarUseGrpc
+                        ? "(TrackClassSubscriber)"
+                        : "(需 DDS/TrackEnableOldSubscriber=1)");
     }
 
     if (m_suspiciousTarget.enabled) {
@@ -613,6 +753,30 @@ void CustomConfig::DestoryFastdds()
         m_newTrackStructSubscriber = nullptr;
     }
 
+    if (m_newTrackStructGrpcClient != nullptr)
+    {
+        try {
+            m_newTrackStructGrpcClient->stop();
+            delete m_newTrackStructGrpcClient;
+        }
+        catch (const std::exception& e) {
+            qDebug() << "销毁 NewTrackStructGrpcClient 异常:" << e.what();
+        }
+        m_newTrackStructGrpcClient = nullptr;
+    }
+
+    if (m_fusionTrackGrpcClient != nullptr)
+    {
+        try {
+            m_fusionTrackGrpcClient->stop();
+            delete m_fusionTrackGrpcClient;
+        }
+        catch (const std::exception& e) {
+            qDebug() << "销毁 FusionTrackGrpcClient 异常:" << e.what();
+        }
+        m_fusionTrackGrpcClient = nullptr;
+    }
+
     //if (m_fastddsPublisher != nullptr)
     //{
     //    try {
@@ -738,7 +902,10 @@ void CustomConfig::setTargetType(const QString& id, int type)
 
 void CustomConfig::SendNewTrackStructAlarmMsg(const AlarmEvent* alarmEvent)
 {
-    if (!m_bFastDDSInitialized || m_newTrackStructSubscriber == nullptr) {
+    if (!m_bFastDDSInitialized) {
+        return;
+    }
+    if (m_newTrackStructSubscriber == nullptr && m_newTrackStructGrpcClient == nullptr) {
         return;
     }
 
@@ -774,7 +941,10 @@ void CustomConfig::SendNewTrackStructAlarmMsg(const AlarmEvent* alarmEvent)
     }
 
     TargetFull::TargetOutputSet merged;
-    if (!m_newTrackStructSubscriber->build_merged_latest(merged)) {
+    const bool gotMerged =
+        (m_newTrackStructSubscriber && m_newTrackStructSubscriber->build_merged_latest(merged))
+        || (m_newTrackStructGrpcClient && m_newTrackStructGrpcClient->build_merged_latest(merged));
+    if (!gotMerged) {
         return;
     }
 
@@ -811,7 +981,10 @@ void CustomConfig::SendNewTrackStructAlarmMsg(const AlarmEvent* alarmEvent)
 
 int CustomConfig::SendSuspiciousTargetMsg(const QSet<QString>& suspiciousUniqueIds)
 {
-    if (!m_bFastDDSInitialized || m_newTrackStructSubscriber == nullptr) {
+    if (!m_bFastDDSInitialized) {
+        return 0;
+    }
+    if (m_newTrackStructSubscriber == nullptr && m_newTrackStructGrpcClient == nullptr) {
         return 0;
     }
     if (m_suspiciousTargetPublisherMulti == nullptr && m_suspiciousTargetPublisherSingle == nullptr) {
@@ -822,7 +995,10 @@ int CustomConfig::SendSuspiciousTargetMsg(const QSet<QString>& suspiciousUniqueI
     }
 
     TargetFull::TargetOutputSet merged;
-    if (!m_newTrackStructSubscriber->build_merged_latest(merged)) {
+    const bool gotMerged =
+        (m_newTrackStructSubscriber && m_newTrackStructSubscriber->build_merged_latest(merged))
+        || (m_newTrackStructGrpcClient && m_newTrackStructGrpcClient->build_merged_latest(merged));
+    if (!gotMerged) {
         qDebug() << "SuspiciousTarget DDS 跳过: build_merged_latest 失败 ids=" << suspiciousUniqueIds.size();
         return 0;
     }
@@ -1517,7 +1693,8 @@ bool CustomConfig::isUniqueIdAlarmFiltered(qint64 uniqueId)
     return isActive(0) || isActive(1);
 }
 
-bool CustomConfig::confirmAlarmByUniqueId(qint64 uniqueId, QString* outMessage)
+bool CustomConfig::confirmAlarmByUniqueId(
+    qint64 uniqueId, QString* outMessage, const ManualConfirmTrackHint* trackHint)
 {
     if (uniqueId <= 0) {
         if (outMessage)
@@ -1536,12 +1713,19 @@ bool CustomConfig::confirmAlarmByUniqueId(qint64 uniqueId, QString* outMessage)
         m_mapManualConfirmResolvedTimeByUniqueId.insert(uniqueId, nowStr);
     m_setManualConfirmedUniqueIds.insert(uniqueId);
 
+    const int confirmThreatFloor = m_alarmLogic.defaultThreatScore > 0
+        ? m_alarmLogic.defaultThreatScore
+        : 90;
+
     bool hadRuleAlarm = false;
     for (auto it = m_mapAlarmData.begin(); it != m_mapAlarmData.end(); ++it) {
         AlarmData& ad = it.value();
         if (static_cast<qint64>(ad.unique_id) != uniqueId)
             continue;
         hadRuleAlarm = true;
+        // 右键设为蓝方：规则告警级别至少升到默认高威胁（严重）
+        if (ad.threatScore < confirmThreatFloor)
+            ad.threatScore = confirmThreatFloor;
         if (m_mapAlarmIdentificationResolvedTime.contains(ad.alarm_id))
             continue;
         m_mapAlarmIdentificationResolvedTime.insert(
@@ -1566,7 +1750,22 @@ bool CustomConfig::confirmAlarmByUniqueId(qint64 uniqueId, QString* outMessage)
         return true;
     }
 
-    const UniqueTrackHit hit = findTrackByUniqueId(this, uniqueId);
+    UniqueTrackHit hit = findTrackByUniqueId(this, uniqueId);
+    bool usedTrackHint = false;
+    if (!hit.found && trackHint && trackHint->valid) {
+        // 内存表已 prune / 本进程未订阅该 topic：用前端附带运动学建 manual alarm（不改 map 超时）
+        std::memset(&hit.track, 0, sizeof(hit.track));
+        hit.track.latDegs = trackHint->latDegs;
+        hit.track.longDegs = trackHint->lonDegs;
+        hit.track.norm.min.speedMps = trackHint->speedMps;
+        hit.track.norm.min.courseDegrees = trackHint->courseDeg;
+        if (uniqueId <= static_cast<qint64>(std::numeric_limits<uint32_t>::max()))
+            hit.track.secondary.uniqueID = static_cast<uint32_t>(uniqueId);
+        hit.track.msgTimeSecs = static_cast<uint32_t>(QDateTime::currentSecsSinceEpoch());
+        hit.isAirTrack = trackHint->isAirTrack;
+        hit.found = true;
+        usedTrackHint = true;
+    }
     if (!hit.found) {
         if (outMessage)
             *outMessage = QStringLiteral("track not found for uniqueId (not in fuse/radar map)");
@@ -1588,19 +1787,29 @@ bool CustomConfig::confirmAlarmByUniqueId(qint64 uniqueId, QString* outMessage)
         : nullptr;
     AlarmData manualAlarm = buildManualAlarmDataFromTrack(
         hit.track, storageUniqueId, m_alarmLogic.defaultThreatScore, existing);
+    manualAlarm.alarm_content = buildManualAlarmContent(
+        this,
+        storageUniqueId,
+        hit.isAirTrack,
+        manualAlarm.targetspeed,
+        manualAlarm.targetdir);
     m_mapManualAlarmData.insert(manualAlarmId, manualAlarm);
     m_mapManualAlarmAirTrack.insert(storageUniqueId, hit.isAirTrack);
 
-    const QString log = QStringLiteral("manual confirm new alarm------trackId:%1 uniqueId:%2 alarmId:%3 air:%4 reqUniqueId:%5")
+    const QString log = QStringLiteral("manual confirm new alarm------trackId:%1 uniqueId:%2 alarmId:%3 air:%4 reqUniqueId:%5 hint:%6")
         .arg(manualAlarm.track_id)
         .arg(storageUniqueId)
         .arg(manualAlarmId)
         .arg(hit.isAirTrack ? 1 : 0)
-        .arg(uniqueId);
+        .arg(uniqueId)
+        .arg(usedTrackHint ? 1 : 0);
     AlarmFileLogger::logNewAlarmTrack(log);
 
-    if (outMessage)
-        *outMessage = QStringLiteral("ok (manual alarm created for dds)");
+    if (outMessage) {
+        *outMessage = usedTrackHint
+            ? QStringLiteral("ok (manual alarm created from client track hint)")
+            : QStringLiteral("ok (manual alarm created for dds)");
+    }
     return true;
 }
 
@@ -1650,6 +1859,32 @@ void CustomConfig::LoadConfig()
         m_struBasicConfig.m_nAlarmEventDDSPortSingle = settings.value("Basic/AlarmEventDDSPortSingle").toInt();
     if (settings.contains("Basic/TrackDDSPort"))
         m_struBasicConfig.m_nTrackDDSPort = settings.value("Basic/TrackDDSPort").toInt();
+    {
+        const QString fusionTx = settings
+                                     .value(QStringLiteral("Basic/FusionTrackTransport"), QStringLiteral("dds"))
+                                     .toString()
+                                     .trimmed()
+                                     .toLower();
+        m_struBasicConfig.m_strFusionTrackTransport =
+            (fusionTx == QStringLiteral("grpc")) ? QStringLiteral("grpc") : QStringLiteral("dds");
+        m_struBasicConfig.m_strNewTrackStructGrpcAddr =
+            settings
+                .value(QStringLiteral("Basic/NewTrackStructGrpcAddr"), QStringLiteral("192.168.18.141:60055"))
+                .toString()
+                .trimmed();
+        const QString radarTx = settings
+                                    .value(QStringLiteral("Basic/RadarTrackTransport"), QStringLiteral("dds"))
+                                    .toString()
+                                    .trimmed()
+                                    .toLower();
+        m_struBasicConfig.m_strRadarTrackTransport =
+            (radarTx == QStringLiteral("grpc")) ? QStringLiteral("grpc") : QStringLiteral("dds");
+        m_struBasicConfig.m_strFusionTrackStreamGrpcAddr =
+            settings
+                .value(QStringLiteral("Basic/FusionTrackStreamGrpcAddr"), QStringLiteral("192.168.18.141:60056"))
+                .toString()
+                .trimmed();
+    }
 
     m_struBasicConfig.m_bEnableLaserRadar = settings.value("Basic/EnableLaserRadar").toBool();
     m_struBasicConfig.m_bEnableMilliwaveRadar = settings.value("Basic/EnableMilliwaveRadar").toBool();
@@ -1895,6 +2130,8 @@ void CustomConfig::LoadConfig()
     m_alarmGrpcClient->configure(grpcHost.toStdString(), grpcPort, grpcEnabled, grpcProducer.toStdString());
     qInfo() << "GrpcAlarm 配置: enabled=" << grpcEnabled
             << "host=" << grpcHost << "port=" << grpcPort;
+    // 启动独立 gRPC 快照推送线程（与 processAlarms 解耦，防止 processAlarms 慢时快照中断导致 NexusUI 告警闪烁）
+    startGrpcSnapshotTimer();
 
     const bool destroyGrpcEnabled = settings.value(QStringLiteral("GrpcDestroy/Enabled"), 1).toInt() != 0;
     const QString destroyGrpcHost = settings.value(QStringLiteral("GrpcDestroy/Host"), grpcHost).toString();
@@ -1906,7 +2143,27 @@ void CustomConfig::LoadConfig()
                 << "host=" << destroyGrpcHost << "port=" << destroyGrpcPort;
     }
 
-    m_dbInitSuccess = false;
+    const bool targetTypeGrpcEnabled =
+        settings.value(QStringLiteral("GrpcTargetType/Enabled"), 1).toInt() != 0;
+    const QString targetTypeGrpcHost =
+        settings.value(QStringLiteral("GrpcTargetType/Host"), QStringLiteral("192.168.18.141")).toString();
+    const int targetTypeGrpcPort =
+        settings.value(QStringLiteral("GrpcTargetType/Port"), 60054).toInt();
+    if (m_targetTypeGrpcClient) {
+        m_targetTypeGrpcClient->configure(
+            targetTypeGrpcHost.toStdString(), targetTypeGrpcPort, targetTypeGrpcEnabled);
+        qInfo() << "GrpcTargetType 配置: enabled=" << targetTypeGrpcEnabled
+                << "host=" << targetTypeGrpcHost << "port=" << targetTypeGrpcPort;
+    }
+
+    m_systemAlarmGrpcEnabled =
+        settings.value(QStringLiteral("GrpcSystemAlarm/Enabled"), 1).toInt() != 0;
+    m_systemAlarmGrpcListen =
+        settings.value(QStringLiteral("GrpcSystemAlarm/Listen"), QStringLiteral("192.168.18.141")).toString();
+    m_systemAlarmGrpcPort =
+        settings.value(QStringLiteral("GrpcSystemAlarm/Port"), 25071).toInt();
+    qInfo() << "GrpcSystemAlarm 配置: enabled=" << m_systemAlarmGrpcEnabled
+            << "listen=" << m_systemAlarmGrpcListen << "port=" << m_systemAlarmGrpcPort;
 }
 
 void CustomConfig::startAlarmDestroyGrpcSubscriber()
@@ -1921,6 +2178,14 @@ void CustomConfig::stopAlarmDestroyGrpcSubscriber()
     if (m_alarmDestroyGrpcSubscriber) {
         m_alarmDestroyGrpcSubscriber->stop();
     }
+}
+
+bool CustomConfig::pushTargetTypeGrpcUpdate(qint64 targetId, const QString& targetType)
+{
+    if (!m_targetTypeGrpcClient || !m_targetTypeGrpcClient->isEnabled()) {
+        return false;
+    }
+    return m_targetTypeGrpcClient->updateTargetType(targetId, targetType);
 }
 
 void CustomConfig::SaveConfig()

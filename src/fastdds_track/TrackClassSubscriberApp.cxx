@@ -477,112 +477,84 @@ void TrackClassSubscriberApp::slotClearTrack()
     QWriteLocker trackWriteLocker(&((CustomConfig*)gConfig)->m_trackDataLock);
     QDateTime curTime = QDateTime::currentDateTime();
 
-    //FuseTrack
+    // 航迹过期时同步删尾迹；再清「航迹已消失、尾迹还在」的孤儿 key
+    auto pruneTrackAndOrphanTrailQint64 = [&](QMap<qint64, SPxPacketTrackExtended>& trackMap,
+                                              QMap<qint64, QList<QPointF>>& trailMap,
+                                              int staleSecs, int& removedCount) {
+        const QList<qint64> trackKeys = trackMap.keys();
+        for (qint64 key : trackKeys) {
+            if (!trackMap.contains(key)) {
+                continue;
+            }
+            try {
+                const SPxPacketTrackExtended track = trackMap.value(key);
+                const QDateTime time = QDateTime::fromSecsSinceEpoch(static_cast<qint64>(track.msgTimeSecs));
+                if (time.secsTo(curTime) > staleSecs) {
+                    trackMap.remove(key);
+                    trailMap.remove(key);
+                    removedCount++;
+                }
+            } catch (...) {
+                continue;
+            }
+        }
+        const QList<qint64> trailKeys = trailMap.keys();
+        for (qint64 key : trailKeys) {
+            if (!trackMap.contains(key)) {
+                trailMap.remove(key);
+            }
+        }
+    };
+
+    auto pruneTrackAndOrphanTrailInt = [&](QMap<int, SPxPacketTrackExtended>& trackMap,
+                                           QMap<int, QList<QPointF>>& trailMap,
+                                           int staleSecs, int& removedCount) {
+        const QList<int> trackKeys = trackMap.keys();
+        for (int key : trackKeys) {
+            if (!trackMap.contains(key)) {
+                continue;
+            }
+            try {
+                const SPxPacketTrackExtended track = trackMap.value(key);
+                const QDateTime time = QDateTime::fromSecsSinceEpoch(static_cast<qint64>(track.msgTimeSecs));
+                if (time.secsTo(curTime) > staleSecs) {
+                    trackMap.remove(key);
+                    trailMap.remove(key);
+                    removedCount++;
+                }
+            } catch (...) {
+                continue;
+            }
+        }
+        const QList<int> trailKeys = trailMap.keys();
+        for (int key : trailKeys) {
+            if (!trackMap.contains(key)) {
+                trailMap.remove(key);
+            }
+        }
+    };
+
     auto& fuseTrackMap = ((CustomConfig*)gConfig)->m_mapFuseTrack;
-    QList<qint64> allFuseKeys = fuseTrackMap.keys(); 
+    auto& fuseTrailMap = ((CustomConfig*)gConfig)->m_mapFuseTrail;
     int fuseRemovedCount = 0;
+    pruneTrackAndOrphanTrailQint64(fuseTrackMap, fuseTrailMap, 8, fuseRemovedCount);
 
-    for (qint64 key : allFuseKeys)
-    {
-        if (fuseTrackMap.contains(key))
-        {
-            try
-            {
-                SPxPacketTrackExtended track = fuseTrackMap.value(key);
-                QDateTime time = QDateTime::fromSecsSinceEpoch(static_cast<qint64>(track.msgTimeSecs));
-                if (time.secsTo(curTime) > 8)
-                {
-                    fuseTrackMap.remove(key);
-                    fuseRemovedCount++;
-                }
-            }
-            catch (...)
-            {
-                continue;
-            }
-        }
-    }
-
-    //FuseTrack
     auto& birdfuseTrackMap = ((CustomConfig*)gConfig)->m_mapBirdFuseTrack;
-    QList<qint64> allBirdFuseKeys = birdfuseTrackMap.keys();
+    auto& birdfuseTrailMap = ((CustomConfig*)gConfig)->m_mapBirdFuseTrail;
     int birdfuseRemovedCount = 0;
+    pruneTrackAndOrphanTrailQint64(birdfuseTrackMap, birdfuseTrailMap, 4, birdfuseRemovedCount);
 
-    for (qint64 key : allBirdFuseKeys)
-    {
-        if (birdfuseTrackMap.contains(key))
-        {
-            try
-            {
-                SPxPacketTrackExtended track = birdfuseTrackMap.value(key);
-                QDateTime time = QDateTime::fromSecsSinceEpoch(static_cast<qint64>(track.msgTimeSecs));
-                if (time.secsTo(curTime) > 4)
-                {
-                    birdfuseTrackMap.remove(key);
-                    birdfuseRemovedCount++;
-                }
-            }
-            catch (...)
-            {
-                continue;
-            }
-        }
-    }
-
-    // ����RadarTrack - ��ȫ��ʹ�õ�����
     auto& radarTrackMap = ((CustomConfig*)gConfig)->m_mapRadarTrack;
-    QList<int> allRadarKeys = radarTrackMap.keys(); // ��ȡ���м��ĸ���
+    auto& radarTrailMap = ((CustomConfig*)gConfig)->m_mapRadarTrail;
     int radarRemovedCount = 0;
+    pruneTrackAndOrphanTrailInt(radarTrackMap, radarTrailMap, 8, radarRemovedCount);
 
-    for (int key : allRadarKeys)
-    {
-        if (radarTrackMap.contains(key)) // �����Ƿ���Ȼ����
-        {
-            try
-            {
-                SPxPacketTrackExtended track = radarTrackMap.value(key);
-                QDateTime time = QDateTime::fromSecsSinceEpoch(static_cast<qint64>(track.msgTimeSecs));
-                if (time.secsTo(curTime) > 8)
-                {
-                    radarTrackMap.remove(key);
-                    radarRemovedCount++;
-                }
-            }
-            catch (...)
-            {
-                // ������ʳ������������Ԫ��
-                continue;
-            }
-        }
-    }
-
-    // ����BirdRadarTrack - ��ȫ��ʹ�õ��������޸�֮ǰ��bug
     auto& radarBirdTrackMap = ((CustomConfig*)gConfig)->m_mapBirdRadarTrack;
-    QList<int> allBirdRadarKeys = radarBirdTrackMap.keys(); // ��ȡ���м��ĸ���
+    auto& radarBirdTrailMap = ((CustomConfig*)gConfig)->m_mapBirdRadarTrail;
     int birdRadarRemovedCount = 0;
+    pruneTrackAndOrphanTrailInt(radarBirdTrackMap, radarBirdTrailMap, 8, birdRadarRemovedCount);
 
-    for (int key : allBirdRadarKeys)
-    {
-        if (radarBirdTrackMap.contains(key)) // �����Ƿ���Ȼ����
-        {
-            try
-            {
-                SPxPacketTrackExtended track = radarBirdTrackMap.value(key);
-                QDateTime time = QDateTime::fromSecsSinceEpoch(static_cast<qint64>(track.msgTimeSecs));
-                if (time.secsTo(curTime) > 8)
-                {
-                    radarBirdTrackMap.remove(key); // �޸���Ӧ��ɾ��BirdRadarTrack������RadarTrack
-                    birdRadarRemovedCount++;
-                }
-            }
-            catch (...)
-            {
-                // ������ʳ������������Ԫ��
-                continue;
-            }
-        }
-    }
-
+    Q_UNUSED(birdfuseRemovedCount);
     //qDebug() << "=======================clear track, removed" << fuseRemovedCount << "fuse tracks," << radarRemovedCount << "radar tracks," << birdRadarRemovedCount << "bird radar tracks";
     m_dataMutex.unlock();
 }

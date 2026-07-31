@@ -156,6 +156,21 @@ struct BasicConfig
     int m_nAlarmEventDDSPort = 199;
     int m_nAlarmEventDDSPortSingle = 146;
     int m_nTrackDDSPort = 141; // 与 track_class 现场域 ID 一致；勿与 MultiTrackDDSPort(相机框 DDS) 混淆，可用 [Basic] TrackDDSPort 覆盖
+
+    /**
+     * 对海/对空融合航迹：dds | grpc
+     * - dds：NewTrackStructSubscriberApp
+     * - grpc：NewTrackStructGrpcClient → :60055
+     */
+    QString m_strFusionTrackTransport = QStringLiteral("dds");
+    QString m_strNewTrackStructGrpcAddr = QStringLiteral("192.168.18.141:60055");
+    /**
+     * 远遥/靖子头雷达：dds | grpc
+     * - dds：TrackClassSubscriber（需 TrackEnableOldSubscriber=1）
+     * - grpc：FusionTrackGrpcClient → :60056 筛 yuan_yao/jing_zi_tou
+     */
+    QString m_strRadarTrackTransport = QStringLiteral("dds");
+    QString m_strFusionTrackStreamGrpcAddr = QStringLiteral("192.168.18.141:60056");
     int m_nRecognitionDDSPort = 142;
     bool m_bDebugMode = false;
     bool m_bUseRemoteCameraControl = false;//设置是否用远程服务控制相机
@@ -2003,6 +2018,8 @@ struct AlarmData {
     int area_id;
     int threatScore = 0;
     int task_status = 0;
+    /** 告警原因/描述，供 gRPC AlarmItem.content 与前端展示 */
+    QString alarm_content;
     /** system_evaluation_data.threat_time（毫秒）：新威胁落库时写入，与 TrackAlarmThread 日志 timeOrigin/timeNow 语义一致 */
     qint64 threat_time_ms = 0;
 };
@@ -2118,7 +2135,9 @@ enum SourceEnum {
     SOURCE_RADAR = 3,           // 雷达
     SOURCE_MANUAL = 4,          // 人工
     SOURCE_ARCHIVE = 5,         // 档案库
-    SOURCE_UNKNOWN = 6          // 未知来源
+    SOURCE_UNKNOWN = 6,         // 未知来源
+    SOURCE_CAM = 7,             // 相机检测
+    SOURCE_TRACK = 8            // 航迹融合研判
 };
 
 // 目标威胁度评估相关定义
@@ -2176,17 +2195,24 @@ struct ThreatAssessmentInput {
 };
 
 struct ThreatAssessmentResult {
-    double targetTypeScore;     // 目标类型评分 s(type)
-    double capabilityScore;     // 目标能力评分 s(θ)
-    double intentionScore;      // 目标意图评分 s(φ)  
+    double targetTypeScore;     // 目标类型评分 s(type)，0~10
+    double capabilityScore;     // 目标能力/航向评分 s(θ)，0~10
+    double intentionScore;      // 目标意图评分 s(φ)
     double opportunityScore;    // 目标机会评分 s(ω)
-    double speedScore;          // 速度评分 s(v)
-    double distanceScore;       // 距离评分 s(l)
-    double totalThreatLevel;    // 总威胁度
+    double speedScore;          // 速度评分 s(v)，0~10
+    double distanceScore;       // 距离评分 s(l)，0~10
+    /** 加权后单项贡献（与总分同口径，四项之和≈总分 0~100） */
+    double weightedTypeScore = 0.0;
+    double weightedSpeedScore = 0.0;
+    double weightedAngleScore = 0.0;
+    double weightedDistanceScore = 0.0;
+    double totalThreatLevel;    // 总威胁度 0~100
     QString threatDescription;  // 威胁等级描述
 
     ThreatAssessmentResult()
-        : capabilityScore(0.0), intentionScore(0.0), opportunityScore(0.0),
+        : targetTypeScore(0.0), capabilityScore(0.0), intentionScore(0.0), opportunityScore(0.0),
+        speedScore(0.0), distanceScore(0.0),
+        weightedTypeScore(0.0), weightedSpeedScore(0.0), weightedAngleScore(0.0), weightedDistanceScore(0.0),
         totalThreatLevel(0.0), threatDescription("无威胁") {}
 };
 

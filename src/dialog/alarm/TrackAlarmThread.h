@@ -19,9 +19,10 @@ private:
     bool isTrackInGroupArea(QPointF pt);
     bool isTrackInGroupAreaByGroupId(QPointF pt, int groupId);
     bool isTrackInOtherAlarmArea(QPolygonF polyNow, QPointF pt, QList< AlarmRule> waringList,int index);
-    void SaveToDB(AlarmRule info, qint64 targetId, float lat, float lon, float speed, float dir, float dis, int TargetType, int threatScore, int timestampSec, int radarSourceId = 0);
+    void SaveToDB(AlarmRule info, qint64 targetId, float lat, float lon, float speed, float dir, float dis, int TargetType, int threatScore, int timestampSec, int radarSourceId = 0, const QString& alarmContent = QString());
     int convertTargetTypeStringToBitmask(const QString& targetType);
     double calculateThreatLevel(const SPxPacketTrackExtended& track, const DataAccessLayer::DetectionTypeResult& detectionResult, const ThreatAssessmentParams& threatParams, bool hasProtectArea = false, const QPointF& protectCenter = QPointF(), double entryAngle = 0.0);
+    ThreatAssessmentResult calculateThreatAssessment(const SPxPacketTrackExtended& track, const DataAccessLayer::DetectionTypeResult& detectionResult, const ThreatAssessmentParams& threatParams, bool hasProtectArea = false, const QPointF& protectCenter = QPointF(), double entryAngle = 0.0);
     double calculateTimeToProtectArea(const SPxPacketTrackExtended& track, const QPointF& protectCenter, double protectRadius);
     int m_alarmType;
     bool m_running;

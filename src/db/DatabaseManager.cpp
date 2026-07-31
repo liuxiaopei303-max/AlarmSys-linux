@@ -1,7 +1,21 @@
 // DatabaseManager.cpp
 #include "DatabaseManager.h"
+#include "db/postgres/PgQtDatabaseManager.h"
 
+#include <QSqlError>
+#include <QSqlRecord>
+#include <QThread>
+#include <QTimer>
+#include <QUuid>
 
+namespace {
+
+QString quoteSqliteIdent(const QString& ident)
+{
+    return QStringLiteral("\"%1\"").arg(QString(ident).replace(QLatin1Char('\"'), QStringLiteral("\"\"")));
+}
+
+} // namespace
 
 DatabaseManager& DatabaseManager::getInstance()
 {
@@ -9,17 +23,63 @@ DatabaseManager& DatabaseManager::getInstance()
     return instance;
 }
 
+bool DatabaseManager::initializeLibpq(const DbInfo& dbInfo, int maxConnections)
+{
+    PgDbInfo info;
+    info.connMode = dbInfo.connMode;
+    info.timeout = dbInfo.timeout;
+    info.connName = dbInfo.connName.toStdString();
+    info.dbName = dbInfo.dbName.toStdString();
+    info.hostName = dbInfo.hostName.toStdString();
+    info.hostPort = dbInfo.hostPort;
+    info.userName = dbInfo.userName.toStdString();
+    info.userPwd = dbInfo.userPwd.toStdString();
+    info.applicationName = "AlarmSys-linux";
+    info.sslMode = "disable";
+
+    auto& pgQt = PgQtDatabaseManager::getInstance();
+    pgQt.rawManager().setDebugCallback([](const std::string&) {});
+    pgQt.rawManager().setErrorCallback([](const std::string& msg) {
+        qWarning().noquote() << "[libpq]" << QString::fromStdString(msg);
+    });
+
+    m_libpqReady = pgQt.initialize(info, maxConnections);
+    if (m_libpqReady) {
+        qInfo() << "Database access mode=libpq (AccessMode=1)"
+                << "host" << dbInfo.hostName << "port" << dbInfo.hostPort
+                << "db" << dbInfo.dbName;
+    } else {
+        qWarning() << "libpq initialize failed:" << pgQt.lastError();
+    }
+    return m_libpqReady;
+}
+
 bool DatabaseManager::initialize(const DbType &dbType, const DbInfo &dbInfo, int maxConnections)
 {
-    bool result = m_connectionPool.initializePool(dbType, dbInfo, maxConnections);
-    return result;
+    m_accessMode = dbInfo.accessMode;
+    if (m_accessMode != 0 && m_accessMode != 1) {
+        qWarning() << "Invalid Database/AccessMode" << m_accessMode << ", fallback to 1 (libpq)";
+        m_accessMode = 1;
+    }
+
+    if (useLibpq()) {
+        return initializeLibpq(dbInfo, maxConnections);
+    }
+
+    m_libpqReady = false;
+    qInfo() << "Database access mode=Qt QPSQL (AccessMode=0)"
+            << "host" << dbInfo.hostName << "port" << dbInfo.hostPort
+            << "db" << dbInfo.dbName;
+    return m_connectionPool.initializePool(dbType, dbInfo, maxConnections);
 }
 
 DatabaseManager::DatabaseManager(QObject* parent)
     : QObject(parent), 
       m_connectionPool(DbConnectionPool::getInstance()),
       m_queryTimeoutMs(10000),
-      m_shuttingDown(false)
+      m_shuttingDown(false),
+      m_accessMode(1),
+      m_libpqReady(false)
 {
     m_threadPool.setMaxThreadCount(QThread::idealThreadCount());
 }
@@ -27,16 +87,174 @@ DatabaseManager::DatabaseManager(QObject* parent)
 DatabaseManager::~DatabaseManager()
 {
     cancelAsyncOperations();
-    m_connectionPool.closeAllConnections();
+    cleanup();
 }
 
 void DatabaseManager::cleanup()
 {
+    if (useLibpq() && m_libpqReady) {
+        PgQtDatabaseManager::getInstance().cleanup();
+        m_libpqReady = false;
+    }
     m_connectionPool.closeAllConnections();
 }
 
+QSqlQuery DatabaseManager::materializeRowsToSqlQuery(const QVector<QVariantMap>& rows)
+{
+    if (rows.isEmpty()) {
+        return QSqlQuery();
+    }
+
+    // 取第一行推断列：优先 _c0,_c1,... 否则用所有非 _c 键
+    const QVariantMap& first = rows.first();
+    QStringList colNames;
+    for (int i = 0; ; ++i) {
+        const QString key = QStringLiteral("_c%1").arg(i);
+        if (!first.contains(key)) {
+            break;
+        }
+        // 优先找真实列名（同序、非 _c）
+        QString realName = key;
+        for (auto it = first.constBegin(); it != first.constEnd(); ++it) {
+            if (it.key().startsWith(QLatin1String("_c"))) {
+                continue;
+            }
+            if (it.value() == first.value(key)) {
+                // 可能误匹配同值列；用 PgQt 的顺序约定：先写入 _c，再写入名
+                // 这里仅作缓存列名：尝试用 keys 中“第 i 个非_c”
+            }
+        }
+        colNames << key;
+    }
+    if (colNames.isEmpty()) {
+        colNames = first.keys();
+        colNames.removeAll(QString());
+    }
+
+    // 若有 _cN，用调用方可 value(i)；同时为名字段建别名列
+    // 重建为：尽量从 rows 的命名键取展示列，空则用 _c
+    QStringList displayCols;
+    if (!colNames.isEmpty() && colNames.first().startsWith(QLatin1String("_c"))) {
+        // 保持索引列；额外扫描命名列挂到同表会复杂，索引访问已够大多数 DAL
+        displayCols = colNames;
+        // 同时加入命名列（去重）
+        for (auto it = first.constBegin(); it != first.constEnd(); ++it) {
+            if (!it.key().startsWith(QLatin1String("_c")) && !displayCols.contains(it.key())) {
+                displayCols << it.key();
+            }
+        }
+    } else {
+        displayCols = colNames;
+    }
+
+    // 唯一化列名（SQLite 禁止 duplicate）
+    QStringList uniqueCols;
+    uniqueCols.reserve(displayCols.size());
+    for (int i = 0; i < displayCols.size(); ++i) {
+        QString name = displayCols.at(i);
+        if (name.isEmpty()) {
+            name = QStringLiteral("_c%1").arg(i);
+        }
+        QString unique = name;
+        int suffix = 0;
+        while (uniqueCols.contains(unique)) {
+            unique = QStringLiteral("%1_%2").arg(name).arg(++suffix);
+        }
+        uniqueCols << unique;
+    }
+
+    const QString connName = QStringLiteral("alarmsys_libpq_buf_%1")
+        .arg(reinterpret_cast<quintptr>(QThread::currentThread()), 0, 16);
+    if (!QSqlDatabase::contains(connName)) {
+        QSqlDatabase memDb = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connName);
+        memDb.setDatabaseName(QStringLiteral(":memory:"));
+        if (!memDb.open()) {
+            qWarning() << "libpq materialize open failed:" << memDb.lastError().text();
+            return QSqlQuery();
+        }
+    }
+    QSqlDatabase memDb = QSqlDatabase::database(connName);
+    static thread_local int s_seq = 0;
+    const QString table = QStringLiteral("qbuf_%1").arg(++s_seq);
+
+    QStringList defs;
+    for (const QString& c : uniqueCols) {
+        defs << quoteSqliteIdent(c) + QStringLiteral(" TEXT");
+    }
+    QSqlQuery setup(memDb);
+    if (!setup.exec(QStringLiteral("CREATE TEMP TABLE %1 (%2)")
+                        .arg(table, defs.join(QLatin1Char(','))))) {
+        qWarning() << "libpq materialize create failed:" << setup.lastError().text();
+        return QSqlQuery();
+    }
+
+    QStringList ph;
+    for (int i = 0; i < uniqueCols.size(); ++i) {
+        ph << QStringLiteral("?");
+    }
+    const QString insertSql = QStringLiteral("INSERT INTO %1 (%2) VALUES (%3)")
+        .arg(table,
+             [&]() {
+                 QStringList q;
+                 for (const QString& c : uniqueCols) {
+                     q << quoteSqliteIdent(c);
+                 }
+                 return q.join(QLatin1Char(','));
+             }(),
+             ph.join(QLatin1Char(',')));
+
+    for (const QVariantMap& row : rows) {
+        setup.prepare(insertSql);
+        for (int i = 0; i < uniqueCols.size(); ++i) {
+            const QString srcKey = displayCols.at(i);
+            setup.bindValue(i, row.value(srcKey));
+        }
+        if (!setup.exec()) {
+            qWarning() << "libpq materialize insert failed:" << setup.lastError().text();
+            return QSqlQuery();
+        }
+    }
+
+    QSqlQuery result(memDb);
+    QStringList selectCols;
+    for (const QString& c : uniqueCols) {
+        selectCols << quoteSqliteIdent(c);
+    }
+    if (!result.exec(QStringLiteral("SELECT %1 FROM %2")
+                         .arg(selectCols.join(QLatin1Char(',')), table))) {
+        qWarning() << "libpq materialize select failed:" << result.lastError().text();
+        return QSqlQuery();
+    }
+    return result;
+}
+
+QSqlQuery DatabaseManager::executeQueryLibpq(const QString& query, const QVariantList& params, int timeoutMs)
+{
+    const QVector<QVariantMap> rows =
+        PgQtDatabaseManager::getInstance().executeQuery(query, params, timeoutMs);
+    return materializeRowsToSqlQuery(rows);
+}
+
+bool DatabaseManager::executeNonQueryLibpq(const QString& query, const QVariantList& params, int timeoutMs)
+{
+    return PgQtDatabaseManager::getInstance().executeNonQuery(query, params, timeoutMs);
+}
+
+QVariant DatabaseManager::executeScalarLibpq(const QString& query, const QVariantList& params, int timeoutMs)
+{
+    return PgQtDatabaseManager::getInstance().executeScalar(query, params, timeoutMs);
+}
+
 QSqlQuery DatabaseManager::executeQuery(const QString& query, const QVariantList& params, int timeoutMs)
-{  
+{
+    if (useLibpq()) {
+        if (!m_libpqReady) {
+            emit error(QStringLiteral("libpq not initialized"));
+            return QSqlQuery();
+        }
+        return executeQueryLibpq(query, params, timeoutMs);
+    }
+  
     // 如果设置了硬超时时间，使用硬超时功能
     if (timeoutMs > 0) {
         qDebug() << "执行带硬超时的查询SQL操作:" << query << "超时时间:" << timeoutMs << "毫秒";
@@ -198,6 +416,19 @@ QSqlQuery DatabaseManager::executeQuery(const QString& query, const QVariantList
 
 bool DatabaseManager::executeNonQuery(const QString& query, const QVariantList& params, int timeoutMs)
 {
+    if (useLibpq()) {
+        if (!m_libpqReady) {
+            emit error(QStringLiteral("libpq not initialized"));
+            return false;
+        }
+        const bool ok = executeNonQueryLibpq(query, params, timeoutMs);
+        if (!ok) {
+            emit error(QStringLiteral("libpq Non-query failed: %1 | SQL: %2")
+                           .arg(PgQtDatabaseManager::getInstance().lastError(), query));
+        }
+        return ok;
+    }
+
     QElapsedTimer timer;
     timer.start();
     
@@ -372,6 +603,14 @@ bool DatabaseManager::executeNonQuery(const QString& query, const QVariantList& 
 
 QVariant DatabaseManager::executeScalar(const QString& query, const QVariantList& params, int timeoutMs)
 {
+    if (useLibpq()) {
+        if (!m_libpqReady) {
+            emit error(QStringLiteral("libpq not initialized"));
+            return {};
+        }
+        return executeScalarLibpq(query, params, timeoutMs);
+    }
+
     QSqlDatabase db = m_connectionPool.getConnection();
     QSqlQuery result = prepareQuery(db, query, params);
 
@@ -653,6 +892,29 @@ void DatabaseManager::bindParams(QSqlQuery& query, const QVariantList& params)
 
 QSqlDatabase DatabaseManager::beginTransaction()
 {
+    if (useLibpq()) {
+        if (!m_libpqReady) {
+            emit error(QStringLiteral("libpq not initialized"));
+            return QSqlDatabase();
+        }
+        auto& pgQt = PgQtDatabaseManager::getInstance();
+        if (!pgQt.beginTransaction()) {
+            emit error(QStringLiteral("Failed to start libpq transaction: %1").arg(pgQt.lastError()));
+            return QSqlDatabase();
+        }
+        // DAL 仅用 isValid() 判断；实际事务在 PgQt 线程本地
+        const QString connName = QStringLiteral("libpq_txn_marker_%1")
+            .arg(reinterpret_cast<quintptr>(QThread::currentThread()), 0, 16);
+        if (!QSqlDatabase::contains(connName)) {
+            QSqlDatabase marker = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connName);
+            marker.setDatabaseName(QStringLiteral(":memory:"));
+            if (!marker.open()) {
+                qWarning() << "libpq txn marker open failed:" << marker.lastError().text();
+            }
+        }
+        return QSqlDatabase::database(connName);
+    }
+
     QSqlDatabase db = m_connectionPool.getConnection();
     if (!db.transaction()) {
         emit error("Failed to start transaction");
@@ -664,6 +926,16 @@ QSqlDatabase DatabaseManager::beginTransaction()
 
 bool DatabaseManager::commitTransaction(QSqlDatabase& db)
 {
+    if (useLibpq()) {
+        Q_UNUSED(db);
+        auto& pgQt = PgQtDatabaseManager::getInstance();
+        const bool success = pgQt.commitTransaction();
+        if (!success) {
+            emit error(QStringLiteral("Failed to commit libpq transaction: %1").arg(pgQt.lastError()));
+        }
+        return success;
+    }
+
     bool success = db.commit();
     if (!success) {
         emit error("Failed to commit transaction");
@@ -674,6 +946,16 @@ bool DatabaseManager::commitTransaction(QSqlDatabase& db)
 
 bool DatabaseManager::rollbackTransaction(QSqlDatabase& db)
 {
+    if (useLibpq()) {
+        Q_UNUSED(db);
+        auto& pgQt = PgQtDatabaseManager::getInstance();
+        const bool success = pgQt.rollbackTransaction();
+        if (!success) {
+            emit error(QStringLiteral("Failed to rollback libpq transaction: %1").arg(pgQt.lastError()));
+        }
+        return success;
+    }
+
     bool success = db.rollback();
     if (!success) {
         emit error("Failed to rollback transaction");

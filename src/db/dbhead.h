@@ -40,6 +40,8 @@ struct DbInfo {
     int hostPort;           //通信端口
     QString userName;       //用户名称
     QString userPwd;        //用户密码
+    /** 0=Qt QPSQL；1=libpq（PgQtDatabaseManager） */
+    int accessMode;
 
     //默认构造函数
     DbInfo() {
@@ -52,6 +54,7 @@ struct DbInfo {
         hostPort = 3306;
         userName = "root";
         userPwd = "root";
+        accessMode = 1;
     }
 
     //重载打印输出格式
@@ -66,6 +69,7 @@ struct DbInfo {
         list << QString("通信端口: %1").arg(dbInfo.hostPort);
         list << QString("用户名称: %1").arg(dbInfo.userName);
         list << QString("用户密码: %1").arg(dbInfo.userPwd);
+        list << QString("访问模式: %1").arg(dbInfo.accessMode == 0 ? "Qt QPSQL" : "libpq");
 
 #if (QT_VERSION >= QT_VERSION_CHECK(5,4,0))
         debug.noquote() << list.join("\n");

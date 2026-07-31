@@ -151,7 +151,9 @@ void clearStaleTrackMaps()
     const QDateTime curTime = QDateTime::currentDateTime();
     QWriteLocker wl(&cfg->m_trackDataLock);
 
-    auto pruneMapQint64 = [&](QMap<qint64, SPxPacketTrackExtended>& trackMap, int staleSecs) {
+    // 航迹过期时同步删除对应尾迹；再清掉「航迹已消失、尾迹还在」的孤儿 key
+    auto pruneMapQint64 = [&](QMap<qint64, SPxPacketTrackExtended>& trackMap,
+                              QMap<qint64, QList<QPointF>>& trailMap, int staleSecs) {
         const QList<qint64> keys = trackMap.keys();
         for (qint64 key : keys) {
             if (!trackMap.contains(key)) {
@@ -161,12 +163,20 @@ void clearStaleTrackMaps()
             const QDateTime time = QDateTime::fromSecsSinceEpoch(static_cast<qint64>(track.msgTimeSecs));
             if (time.secsTo(curTime) > staleSecs) {
                 trackMap.remove(key);
+                trailMap.remove(key);
+            }
+        }
+        // 尾迹只能挂在仍存活的航迹上：扫一遍 trail，没有对应 track 就删
+        const QList<qint64> trailKeys = trailMap.keys();
+        for (qint64 key : trailKeys) {
+            if (!trackMap.contains(key)) {
+                trailMap.remove(key);
             }
         }
     };
 
-    pruneMapQint64(cfg->m_mapFuseTrack, 8);
-    pruneMapQint64(cfg->m_mapBirdFuseTrack, 4);
+    pruneMapQint64(cfg->m_mapFuseTrack, cfg->m_mapFuseTrail, 8);
+    pruneMapQint64(cfg->m_mapBirdFuseTrack, cfg->m_mapBirdFuseTrail, 4);
 }
 
 void appendTrailPoint(QList<QPointF>& trail, const SPxPacketTrackExtended& track, int maxPoints)

@@ -1,4 +1,5 @@
 #include "TrackAlarmThread.h"
+#include "AlarmContentBuilder.h"
 #include "AlarmFileLogger.h"
 #include "alarm_geoproj.h"
 #include <QDebug>
@@ -236,9 +237,18 @@ void TrackAlarmThread::run()
 		// 根据告警类型处理不同的业务逻辑
 		if (gConfig->m_alarmLogic.refreshTargetInfoFilterEachLoop)
 			gConfig->m_mapTargetInfoFilter = gConfig->dbHelper.getTargetInfoFilter();
- 		processAlarms();
+		{
+			const qint64 t0 = QDateTime::currentMSecsSinceEpoch();
+			processAlarms();
+			const qint64 elapsed = QDateTime::currentMSecsSinceEpoch() - t0;
+			if (elapsed > 3000) {
+				// processAlarms 超 3s 记一条警告，便于定位慢的根因
+				qWarning() << "TrackAlarmThread: processAlarms SLOW elapsed=" << elapsed << "ms";
+			}
+		}
 		gConfig->SendAllAlarmEventMsg();
-		gConfig->tickAlarmGrpcSnapshot();
+		// tickAlarmGrpcSnapshot 已移至独立线程（startGrpcSnapshotTimer），此处不再调用
+		// gConfig->tickAlarmGrpcSnapshot();
 		QMap<QString, AlarmData>::iterator it = gConfig->m_mapAlarmData.end();
 
 		// 先检查是否为空
@@ -292,7 +302,7 @@ void TrackAlarmThread::run()
 	}
 }
 
-void TrackAlarmThread::SaveToDB(AlarmRule info, qint64 targetId, float lat, float lon, float speed, float dir, float dis, int TargetType, int threatScore, int timestampSec, int radarSourceId)
+void TrackAlarmThread::SaveToDB(AlarmRule info, qint64 targetId, float lat, float lon, float speed, float dir, float dis, int TargetType, int threatScore, int timestampSec, int radarSourceId, const QString& alarmContent)
 {
 	if (targetId <= 0) {
 		logAlarmTrace(QStringLiteral("SaveToDB skip invalid target_id------targetId:%1 conditionId:%2")
@@ -408,6 +418,7 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, qint64 targetId, float lat, floa
 		newAlarm.time = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz");
 		newAlarm.origintime = buildOriginTime();
 		newAlarm.alarm_status = 0;
+		newAlarm.alarm_content = alarmContent;
 		newAlarm.threat_time_ms = al.originTimeFromTrackMsg
 			? (al.originTrackTimeIsMs ? static_cast<qint64>(timestampSec)
 						  : static_cast<qint64>(timestampSec) * 1000LL)
@@ -447,6 +458,9 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, qint64 targetId, float lat, floa
 				sendAlarm.targettype = radarSourceId;
 			sendAlarm.group_id = info.group_id;
 			sendAlarm.area_id = info.area_id;
+			if (!alarmContent.isEmpty()) {
+				sendAlarm.alarm_content = alarmContent;
+			}
 			sendAlarm.time = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz");
 			if (gConfig->m_struBasicConfig.m_nUseBasePoint == 1)
 			{
@@ -783,6 +797,34 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 				(targetId > 0 && targetId <= static_cast<qint64>(std::numeric_limits<int>::max()))
 					? static_cast<int>(targetId)
 					: 0;
+			const bool isAirTrackForContent = (info.track_type > 0) || (type == 3);
+			ThreatAssessmentResult lastThreatBreakdown;
+			bool hasLastThreatBreakdown = false;
+			auto buildContent = [&](const QString& triggerPath, bool hasProtectArea, double attackAngle,
+						int threatScoreForContent,
+						const DataAccessLayer::DetectionTypeResult* det, bool hasDet) {
+				AlarmContentBuildInput in;
+				in.rule = &info;
+				in.cfg = gConfig;
+				in.uniqueId = targetId;
+				in.speedMps = track.norm.min.speedMps;
+				in.courseDeg = track.norm.min.courseDegrees;
+				in.attackAngleDeg = attackAngle;
+				in.heightM = height;
+				in.threatScore = threatScoreForContent;
+				in.hasProtectArea = hasProtectArea;
+				in.isAirTrack = isAirTrackForContent;
+				in.triggerPath = triggerPath;
+				if (hasLastThreatBreakdown) {
+					in.hasThreatBreakdown = true;
+					in.threatBreakdown = lastThreatBreakdown;
+				}
+				if (hasDet && det) {
+					in.detection = *det;
+					in.hasDetection = true;
+				}
+				return buildRuleAlarmContent(in);
+			};
 
 			// 免告警区：位于 NoAlarmGroupIdList 指定 group 内且无已发布告警则跳过；已有告警则持续
 			{
@@ -845,7 +887,10 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 				logAlarmTrace(QStringLiteral("updataAlarmTrackToDB pass------targetId:%1 path:blacklist conditionId:%2")
 					.arg(targetId)
 					.arg(info.condition_id));
-				SaveToDB(info, targetId, track.latDegs, track.longDegs, track.norm.min.speedMps, track.norm.min.courseDegrees, track.norm.min.rangeMetres, type, al.defaultThreatScore, static_cast<int>(track.msgTimeSecs), radarSourceId);
+				const QString blacklistContent = buildContent(
+					QStringLiteral("blacklist"), false, track.norm.min.courseDegrees,
+					al.defaultThreatScore, nullptr, false);
+				SaveToDB(info, targetId, track.latDegs, track.longDegs, track.norm.min.speedMps, track.norm.min.courseDegrees, track.norm.min.rangeMetres, type, al.defaultThreatScore, static_cast<int>(track.msgTimeSecs), radarSourceId, blacklistContent);
 			}
 			// 如果是白名单过滤掉的目标，直接跳过
 			else if (whitelistSkip) {
@@ -1170,7 +1215,7 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 						DataAccessLayer::DetectionTypeResult detectionResult = gConfig->dbHelper.getDetectionTypesByReId(uniqueId);
 
 						if (!detectionResult.found) {
-							// 如果没有找到认知结果数据，则不通过检测相关的过滤条件
+							// 对海：无认知结果则不通过；对空(type==3)：放行，仍计算威胁度
 							if(type != 3) {
 								passFilter = false;
 								failReason = QStringLiteral("detection_not_found uniqueId:%1 trackType:%2")
@@ -1214,46 +1259,51 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 										.arg(info.uav_detect_type);
 								}
 							}
+						}
 
-							// 威胁度判断 - 从内存中的参数计算威胁度
-							if ((info.threat_level1 > 0 || info.threat_level2 > 0) && passFilter) {
-								// 从内存中查找当前区域的威胁度参数
-								ThreatAssessmentParams threatParams;
-								bool foundParams = false;
-								for (const ThreatAssessmentParams& params : gConfig->m_listThreatAssessmentParams) {
-									if (params.groupId == info.group_id && params.areaId == info.area_id) {
-										threatParams = params;
-										foundParams = true;
-										break;
-									}
+						// 威胁度判断：对海需有认知结果；对空无认知结果也计算（类型分按 reserved1/未知）
+						if ((info.threat_level1 > 0 || info.threat_level2 > 0) && passFilter) {
+							ThreatAssessmentParams threatParams;
+							bool foundParams = false;
+							for (const ThreatAssessmentParams& params : gConfig->m_listThreatAssessmentParams) {
+								if (params.groupId == info.group_id && params.areaId == info.area_id) {
+									threatParams = params;
+									foundParams = true;
+									break;
 								}
-								
-								// 如果内存中没有找到，使用默认参数
-								if (!foundParams) {
-									threatParams = ThreatAssessmentParams(info.group_id, info.area_id);
-								}
-								
-								// 计算威胁度（传递保护区信息和进入角）
-								double calculatedThreatLevel = calculateThreatLevel(track, detectionResult, threatParams, hasProtectArea, protectCenter, angleToCheck);
-								lastCalculatedThreatScore = qBound(0, static_cast<int>(qRound(calculatedThreatLevel)), 100);
-								
-								if (info.threat_level1 > 0 && calculatedThreatLevel >= info.threat_level1) {
-									// 超过直接告警阈值，直接告警
-									blacklistAlarm = true;
-									logAlarmTrace(QStringLiteral("updataAlarmTrackToDB pass------trackId:%1 path:threat_direct score:%2 threshold:%3 conditionId:%4")
-										.arg(track.norm.min.id)
-										.arg(calculatedThreatLevel)
-										.arg(info.threat_level1)
-										.arg(info.condition_id));
-								}
-								else if (info.threat_level1 > 0 && calculatedThreatLevel < info.threat_level1) {
-									// 低于查证阈值，不告警
-									passFilter = false;
-									failReason = QStringLiteral("threat_score_low score:%1 threshold:%2 uniqueId:%3")
-										.arg(calculatedThreatLevel)
-										.arg(info.threat_level1)
-										.arg(uniqueId);
-								}
+							}
+							if (!foundParams) {
+								threatParams = ThreatAssessmentParams(info.group_id, info.area_id);
+							}
+
+							lastThreatBreakdown = calculateThreatAssessment(
+								track, detectionResult, threatParams, hasProtectArea, protectCenter, angleToCheck);
+							hasLastThreatBreakdown = true;
+							const double calculatedThreatLevel = lastThreatBreakdown.totalThreatLevel;
+							lastCalculatedThreatScore = qBound(0, static_cast<int>(qRound(calculatedThreatLevel)), 100);
+
+							if (info.threat_level1 > 0 && calculatedThreatLevel >= info.threat_level1) {
+								blacklistAlarm = true;
+								logAlarmTrace(QStringLiteral("updataAlarmTrackToDB pass------trackId:%1 path:threat_direct score:%2 type:%3 speed:%4 angle:%5 dist:%6 threshold:%7 conditionId:%8")
+									.arg(track.norm.min.id)
+									.arg(calculatedThreatLevel, 0, 'f', 1)
+									.arg(lastThreatBreakdown.weightedTypeScore, 0, 'f', 1)
+									.arg(lastThreatBreakdown.weightedSpeedScore, 0, 'f', 1)
+									.arg(lastThreatBreakdown.weightedAngleScore, 0, 'f', 1)
+									.arg(lastThreatBreakdown.weightedDistanceScore, 0, 'f', 1)
+									.arg(info.threat_level1)
+									.arg(info.condition_id));
+							}
+							else if (info.threat_level1 > 0 && calculatedThreatLevel < info.threat_level1) {
+								passFilter = false;
+								failReason = QStringLiteral("threat_score_low score:%1 type:%2 speed:%3 angle:%4 dist:%5 threshold:%6 uniqueId:%7")
+									.arg(calculatedThreatLevel, 0, 'f', 1)
+									.arg(lastThreatBreakdown.weightedTypeScore, 0, 'f', 1)
+									.arg(lastThreatBreakdown.weightedSpeedScore, 0, 'f', 1)
+									.arg(lastThreatBreakdown.weightedAngleScore, 0, 'f', 1)
+									.arg(lastThreatBreakdown.weightedDistanceScore, 0, 'f', 1)
+									.arg(info.threat_level1)
+									.arg(uniqueId);
 							}
 						}
 					}
@@ -1277,7 +1327,29 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 							.arg(track.norm.min.reserved1)
 							.arg(info.condition_id),
 						10000);
-					SaveToDB(info, targetId, track.latDegs, track.longDegs, track.norm.min.speedMps, track.norm.min.courseDegrees, track.norm.min.rangeMetres, type, lastCalculatedThreatScore, static_cast<int>(track.msgTimeSecs), radarSourceId);
+					// 证据链只在「首次触发 / 条件再次满足」时写入触发时刻速度航向；
+					// 纯持续告警（当前不满足规则）保留首次 content，勿用当前值覆盖。
+					QString ruleContent;
+					if (!(trackAlreadyHasAlarm && !passFilter)) {
+						const qint64 detectionKey =
+							track.secondary.uniqueID > 0 ? track.secondary.uniqueID : targetId;
+						DataAccessLayer::DetectionTypeResult detectionForContent =
+							gConfig->dbHelper.getDetectionTypesByReId(detectionKey);
+						const bool hasDetectionForContent = detectionForContent.found;
+						QString triggerPath = QStringLiteral("rule_match");
+						if (info.threat_level1 > 0
+							&& lastCalculatedThreatScore >= info.threat_level1) {
+							triggerPath = QStringLiteral("threat_direct");
+						}
+						ruleContent = buildContent(
+							triggerPath,
+							hasProtectArea,
+							angleToCheck,
+							lastCalculatedThreatScore,
+							&detectionForContent,
+							hasDetectionForContent);
+					}
+					SaveToDB(info, targetId, track.latDegs, track.longDegs, track.norm.min.speedMps, track.norm.min.courseDegrees, track.norm.min.rangeMetres, type, lastCalculatedThreatScore, static_cast<int>(track.msgTimeSecs), radarSourceId, ruleContent);
 				}
 				else {
 					logAlarmTraceThrottled(
@@ -1446,9 +1518,19 @@ void TrackAlarmThread::processAlarms()
 		m_mapBirdRadarTrack = gConfig->m_mapBirdFuseTrack;
 		//qDebug() << "TrackAlarmThread: processAlarms: m_mapBirdRadarTrack size" << m_mapBirdRadarTrack.size();
 		m_mapAISTrack = gConfig->m_mapAISTrack;
-		m_mapFuseTrail = gConfig->m_mapFuseTrail;
-		m_mapRadarTrail = gConfig->m_mapRadarTrail;
-		m_mapBirdRadarTrail = gConfig->m_mapBirdFuseTrail;
+		// 尾迹只拷贝当前在航迹表中的 key，避免整表深拷贝随残留 key 膨胀拖慢循环
+		auto copyTrailForLiveTracks = [](auto& dst, const auto& src, const auto& trackMap) {
+			dst.clear();
+			for (auto it = trackMap.constBegin(); it != trackMap.constEnd(); ++it) {
+				const auto trailIt = src.constFind(it.key());
+				if (trailIt != src.constEnd()) {
+					dst.insert(it.key(), trailIt.value());
+				}
+			}
+		};
+		copyTrailForLiveTracks(m_mapFuseTrail, gConfig->m_mapFuseTrail, gConfig->m_mapFuseTrack);
+		copyTrailForLiveTracks(m_mapRadarTrail, gConfig->m_mapRadarTrail, gConfig->m_mapRadarTrack);
+		copyTrailForLiveTracks(m_mapBirdRadarTrail, gConfig->m_mapBirdFuseTrail, gConfig->m_mapBirdFuseTrack);
 		m_mapAISTrail = gConfig->m_mapAISTrail;
 	}
 	int trailCount = 2;
@@ -4157,133 +4239,139 @@ int TrackAlarmThread::convertTargetTypeStringToBitmask(const QString& targetType
 	return 0;
 }
 
-double TrackAlarmThread::calculateThreatLevel(const SPxPacketTrackExtended& track, const DataAccessLayer::DetectionTypeResult& detectionResult, const ThreatAssessmentParams& threatParams, bool hasProtectArea, const QPointF& protectCenter, double entryAngle)
+ThreatAssessmentResult TrackAlarmThread::calculateThreatAssessment(const SPxPacketTrackExtended& track, const DataAccessLayer::DetectionTypeResult& detectionResult, const ThreatAssessmentParams& threatParams, bool hasProtectArea, const QPointF& protectCenter, double entryAngle)
 {
-	// 威胁度计算基于数据库参数
-	double targetTypeScore = 0.0;
-	double speedScore = 0.0;
-	double distanceScore = 0.0;
-	double capabilityScore = 0.0;
+	ThreatAssessmentResult result;
 
 	// 1. 根据检测结果确定目标类型评分
 	QString finalTargetType = detectionResult.finalTargetType;
+	// 无认知类型时：对空 reserved1==3（无人机）按 drone；其余空类型不给类型分
+	if (finalTargetType.isEmpty() && track.norm.min.reserved1 == 3) {
+		finalTargetType = QStringLiteral("drone");
+	}
 	if (!finalTargetType.isEmpty()) {
 		if (finalTargetType == "speedboat" || finalTargetType == "yacht") {
-			targetTypeScore = threatParams.seaSpeedboatScore;
+			result.targetTypeScore = threatParams.seaSpeedboatScore;
 		}
 		else if (finalTargetType == "warship") {
-			targetTypeScore = threatParams.seaWarshipScore;
+			result.targetTypeScore = threatParams.seaWarshipScore;
 		}
 		else if (finalTargetType == "motorboat") {
-			targetTypeScore = threatParams.seaMotorboatScore;
+			result.targetTypeScore = threatParams.seaMotorboatScore;
 		}
 		else if (finalTargetType == "fishingboat") {
-			targetTypeScore = threatParams.seaFishingBoatScore;
+			result.targetTypeScore = threatParams.seaFishingBoatScore;
 		}
 		else if (finalTargetType == "ship") {
-			targetTypeScore = threatParams.seaShipScore;
+			result.targetTypeScore = threatParams.seaShipScore;
 		}
 		else if (finalTargetType == "cargoship") {
-			targetTypeScore = threatParams.seaCargoShipScore;
+			result.targetTypeScore = threatParams.seaCargoShipScore;
 		}
 		else if (finalTargetType == "buoy") {
-			targetTypeScore = threatParams.seaBuoyScore;
+			result.targetTypeScore = threatParams.seaBuoyScore;
 		}
 		else if (finalTargetType == "uav" || finalTargetType == "drone") {
-			targetTypeScore = threatParams.airDroneScore;
+			result.targetTypeScore = threatParams.airDroneScore;
 		}
 		else if (finalTargetType == "drone_swarm") {
-			targetTypeScore = threatParams.airDroneSwarmScore;
+			result.targetTypeScore = threatParams.airDroneSwarmScore;
 		}
 		else if (finalTargetType == "compound_wing") {
-			targetTypeScore = threatParams.airCompoundWingScore;
+			result.targetTypeScore = threatParams.airCompoundWingScore;
 		}
 		else if (finalTargetType == "rotorcraft") {
-			targetTypeScore = threatParams.airRotorcraftScore;
+			result.targetTypeScore = threatParams.airRotorcraftScore;
 		}
 		else if (finalTargetType == "aircraft") {
-			targetTypeScore = threatParams.airAircraftScore;
+			result.targetTypeScore = threatParams.airAircraftScore;
 		}
 		else if (finalTargetType == "bird") {
-			targetTypeScore = threatParams.airBirdScore;
+			result.targetTypeScore = threatParams.airBirdScore;
 		}
 		else if (finalTargetType == "bird_flock") {
-			targetTypeScore = threatParams.airBirdFlockScore;
+			result.targetTypeScore = threatParams.airBirdFlockScore;
 		}
 		else {
-			// 默认为未知海上目标
-			targetTypeScore = threatParams.seaUnknownScore;
+			result.targetTypeScore = threatParams.seaUnknownScore;
 		}
 	}
 
 	// 2. 计算速度评分
 	double speed = track.norm.min.speedMps;
 	if (speed < threatParams.speedThresholdLow) {
-		speedScore = 0.0;
+		result.speedScore = 0.0;
 	}
 	else if (speed <= threatParams.speedThresholdHigh) {
-		speedScore = (speed - threatParams.speedThresholdLow) / (threatParams.speedThresholdHigh - threatParams.speedThresholdLow) * 10.0;
+		result.speedScore = (speed - threatParams.speedThresholdLow) / (threatParams.speedThresholdHigh - threatParams.speedThresholdLow) * 10.0;
 	}
 	else {
-		speedScore = 10.0;
+		result.speedScore = 10.0;
 	}
 
 	// 3. 计算距离评分（基于保护区）
 	if (hasProtectArea) {
-		// 计算目标到保护区圆心的距离
 		double distanceToProtectCenter = CommonFunc::GetDistance(track.longDegs, track.latDegs, protectCenter.y(), protectCenter.x());
-		
 		if (distanceToProtectCenter > 0 && threatParams.maxEffectiveDistance > 0) {
-			// 距离越近威胁越大
-			distanceScore = std::max(0.0, (threatParams.maxEffectiveDistance - distanceToProtectCenter) / threatParams.maxEffectiveDistance * 10.0);
+			result.distanceScore = std::max(0.0, (threatParams.maxEffectiveDistance - distanceToProtectCenter) / threatParams.maxEffectiveDistance * 10.0);
 		}
 	}
 	else {
-		// 没有保护区时，使用基准点或自身位置
 		double distance = 0.0;
 		if (gConfig->m_struBasicConfig.m_nUseBasePoint == 1) {
-			distance = CommonFunc::GetDistance(track.longDegs, track.latDegs, 
+			distance = CommonFunc::GetDistance(track.longDegs, track.latDegs,
 				gConfig->m_struBasicConfig.m_dBasePointLon, gConfig->m_struBasicConfig.m_dBasePointLat);
 		}
 		else {
 			distance = track.norm.min.rangeMetres;
 		}
-
 		if (distance > 0 && threatParams.maxEffectiveDistance > 0) {
-			distanceScore = std::max(0.0, (threatParams.maxEffectiveDistance - distance) / threatParams.maxEffectiveDistance * 10.0);
+			result.distanceScore = std::max(0.0, (threatParams.maxEffectiveDistance - distance) / threatParams.maxEffectiveDistance * 10.0);
 		}
 	}
 
-	// 4. 计算能力评分（基于进入角，浮标为0）
+	// 4. 计算能力评分（基于进入角/航向，浮标为0）
 	if (finalTargetType == "buoy") {
-		capabilityScore = 0.0;
+		result.capabilityScore = 0.0;
+	}
+	else if (hasProtectArea) {
+		result.capabilityScore = abs((180.0 - entryAngle) / 180.0 * 10.0);
 	}
 	else {
-		if (hasProtectArea) {
-			// 使用传入的进入角计算能力评分
-			// 进入角越小（越直接指向保护区），威胁越大
-			capabilityScore = abs((180.0 - entryAngle) / 180.0 * 10.0);
-		}
-		else {
-			// 没有保护区时，使用目标航向角
-			double courseDegrees = track.norm.min.courseDegrees;
-			capabilityScore = abs((180.0 - courseDegrees) / 180.0 * 10.0);
-		}
+		double courseDegrees = track.norm.min.courseDegrees;
+		result.capabilityScore = abs((180.0 - courseDegrees) / 180.0 * 10.0);
 	}
 
-	// 5. 根据权重计算总威胁度
-	double totalThreatLevel = (
-		targetTypeScore * threatParams.typeWeight +
-		capabilityScore * threatParams.angleWeight +
-		speedScore * threatParams.speedWeight +
-		distanceScore * threatParams.distanceWeight
-		) / 10.0 * 100.0;
+	// 5. 根据权重计算总威胁度（0~100）；单项亦输出加权后贡献分
+	result.weightedTypeScore = result.targetTypeScore * threatParams.typeWeight / 10.0 * 100.0;
+	result.weightedAngleScore = result.capabilityScore * threatParams.angleWeight / 10.0 * 100.0;
+	result.weightedSpeedScore = result.speedScore * threatParams.speedWeight / 10.0 * 100.0;
+	result.weightedDistanceScore = result.distanceScore * threatParams.distanceWeight / 10.0 * 100.0;
 
-	// 确保威胁度在0-100范围内
+	double totalThreatLevel =
+		result.weightedTypeScore + result.weightedAngleScore
+		+ result.weightedSpeedScore + result.weightedDistanceScore;
+
 	if (totalThreatLevel < 0.0) totalThreatLevel = 0.0;
 	if (totalThreatLevel > 100.0) totalThreatLevel = 100.0;
+	result.totalThreatLevel = totalThreatLevel;
 
-	return totalThreatLevel;
+	if (totalThreatLevel >= 70.0) {
+		result.threatDescription = QStringLiteral("高威胁");
+	} else if (totalThreatLevel >= 30.0) {
+		result.threatDescription = QStringLiteral("中威胁");
+	} else if (totalThreatLevel > 0.0) {
+		result.threatDescription = QStringLiteral("低威胁");
+	} else {
+		result.threatDescription = QStringLiteral("无威胁");
+	}
+
+	return result;
+}
+
+double TrackAlarmThread::calculateThreatLevel(const SPxPacketTrackExtended& track, const DataAccessLayer::DetectionTypeResult& detectionResult, const ThreatAssessmentParams& threatParams, bool hasProtectArea, const QPointF& protectCenter, double entryAngle)
+{
+	return calculateThreatAssessment(track, detectionResult, threatParams, hasProtectArea, protectCenter, entryAngle).totalThreatLevel;
 }
 
 double TrackAlarmThread::calculateTimeToProtectArea(const SPxPacketTrackExtended& track, const QPointF& protectCenter, double protectRadius)

@@ -3,6 +3,8 @@
 #include "db/DatabaseManager.h"
 #include "dialog/alarm/TrackAlarmThread.h"
 #include "dialog/alarm/SuspiciousTargetThread.h"
+#include "dialog/analysis/TargetTypeFusionThread.h"
+#include "grpc_system_alarm/SystemAlarmGrpcServer.hpp"
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -26,12 +28,23 @@ int main(int argc, char* argv[])
     CustomConfig* cfg = CustomConfig::getInstance();
     cfg->LoadConfig();
 
-    if (!cfg->dbHelper.initDatabase()) {
+    cfg->m_dbInitSuccess = cfg->dbHelper.initDatabase();
+    if (!cfg->m_dbInitSuccess) {
         qWarning() << "数据库初始化失败，请检查配置与 SQL 文件路径";
     }
 
     cfg->InitFastdds();
     cfg->startAlarmDestroyGrpcSubscriber();
+
+    alarmsys::grpc_system_alarm::SystemAlarmGrpcServer systemAlarmServer;
+    if (cfg->m_systemAlarmGrpcEnabled) {
+        if (!systemAlarmServer.start(
+                cfg->m_systemAlarmGrpcListen.toStdString(), cfg->m_systemAlarmGrpcPort)) {
+            qWarning() << "SystemAlarm gRPC 未启动，进程仍运行其它逻辑";
+        }
+    } else {
+        qInfo() << "SystemAlarm gRPC 已禁用 (GrpcSystemAlarm/Enabled=0)";
+    }
 
     TrackAlarmThread* alarmThread = new TrackAlarmThread(1);
     alarmThread->start();
@@ -42,6 +55,10 @@ int main(int argc, char* argv[])
         suspiciousThread->start();
     }
 
+    // AccessMode=1(libpq) 后不再经 Qt 连接池强杀 inUse；研判逻辑本身安全，重新开启
+    TargetTypeFusionThread* targetTypeFusionThread = new TargetTypeFusionThread();
+    targetTypeFusionThread->start();
+
     const quint16 httpPort = static_cast<quint16>(cfg->m_struBasicConfig.m_nTaskHostPort);
     AlarmHttpServer http(cfg);
     if (!http.start(httpPort)) {
@@ -51,6 +68,8 @@ int main(int argc, char* argv[])
     // 不注册 SIGINT/SIGTERM：原先空 handleSig 会吞掉 Ctrl+C；交给默认行为即可结束进程
     const int code = app.exec();
 
+    systemAlarmServer.stop();
+
     alarmThread->stop();
     alarmThread->wait(5000);
     delete alarmThread;
@@ -59,6 +78,12 @@ int main(int argc, char* argv[])
         suspiciousThread->stop();
         suspiciousThread->wait(5000);
         delete suspiciousThread;
+    }
+
+    if (targetTypeFusionThread != nullptr) {
+        targetTypeFusionThread->stop();
+        targetTypeFusionThread->wait(5000);
+        delete targetTypeFusionThread;
     }
 
     cfg->stopAlarmDestroyGrpcSubscriber();

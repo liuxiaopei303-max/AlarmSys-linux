@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package targetTypePkg;
+
+message TargetTypeUpdate {
+  string targetID = 1;
+  string targetType = 2;
+}
+
+message TargetTypeUpdateAck {
+  bool accepted = 1;
+  string targetID = 2;
+  string targetType = 3;
+  string reason = 4;
+  double serverTime = 5;
+}
+
+service TargetTypeService {
+  rpc UpdateTargetType(TargetTypeUpdate) returns (TargetTypeUpdateAck);
+  rpc StreamTargetTypeUpdates(stream TargetTypeUpdate) returns (stream TargetTypeUpdateAck);
+}

@@ -96,6 +96,8 @@ class DatabaseManager : public QObject
 public:
     static DatabaseManager& getInstance();
     bool initialize(const DbType& dbType, const DbInfo& dbInfo, int maxConnections = 10);
+    /** 0=Qt QPSQL；1=libpq */
+    int accessMode() const { return m_accessMode; }
 
     // 超时设置
     void setQueryTimeout(int milliseconds);
@@ -135,11 +137,19 @@ private:
     void bindParams(QSqlQuery& query, const QVariantList& params);
     bool isQueryTimedOut(const QElapsedTimer& timer) const;
 
-    
+    bool useLibpq() const { return m_accessMode == 1; }
+    bool initializeLibpq(const DbInfo& dbInfo, int maxConnections);
+    QSqlQuery executeQueryLibpq(const QString& query, const QVariantList& params, int timeoutMs);
+    bool executeNonQueryLibpq(const QString& query, const QVariantList& params, int timeoutMs);
+    QVariant executeScalarLibpq(const QString& query, const QVariantList& params, int timeoutMs);
+    static QSqlQuery materializeRowsToSqlQuery(const QVector<QVariantMap>& rows);
+
     QThreadPool m_threadPool;
     int m_queryTimeoutMs;
     QMutex m_mutex;
     bool m_shuttingDown;
+    int m_accessMode = 1;
+    bool m_libpqReady = false;
 
 signals:
     void error(const QString& errorMessage);

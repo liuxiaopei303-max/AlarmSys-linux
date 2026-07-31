@@ -182,6 +182,18 @@ public:
     QMap<QString, QList<AlarmIdentificationRuleSub>> getAlarmIdentificationRulesSub();
     /** minio_multi_metadata：是否存在 unique_id + file_name LIKE 的记录（用于 detection_rules.optic） */
     bool hasMinioMultiMetadataForUniqueId(qint64 uniqueId, const QString& fileNameLikePattern);
+
+    /** minio_multi_metadata 最新截图元数据（按 uploaded_at 降序） */
+    struct MinioMetadataResult {
+        QString minioBucket;
+        QString minioObjectKey;
+        QString downloadUrl;
+        QString cameraIndex;
+        QString fileName;
+        QString uploadedAt; // yyyy-MM-dd hh:mm:ss 或 ISO
+        bool found = false;
+    };
+    MinioMetadataResult getLatestMinioMetadataByUniqueId(qint64 uniqueId);
     /** 当前激活 scheme 下 area_identification_rules：key 为 "group_id_area_id"，value 为去重后的 rule_id 列表（用于规则并集） */
     QMap<QString, QStringList> getIdentificationRuleIdsByAreaForActiveScheme();
     /** 当前激活 scheme 下 area_verification_rules：key 为 "group_id_area_id"，value 为去重后的 rule_id 列表 */
@@ -214,6 +226,19 @@ public:
 
     // 根据reid获取检测类型信息
     DetectionTypeResult getDetectionTypesByReId(qint64 reId);
+
+    struct CognitiveTypeJudgeRow {
+        qint64 uniqueId = 0;
+        QString camTargetType;
+        QString trackTargetType;
+        QString llmTargetType;
+        QString finalTargetType;
+        QString finalTypeSource;
+    };
+
+    bool ensureFinalTypeSourceEnumValues();
+    QList<CognitiveTypeJudgeRow> fetchCognitiveTypeJudgeRows(const QList<qint64>& uniqueIds);
+    bool updateFinalTargetTypeJudgement(qint64 uniqueId, const QString& finalType, const QString& source);
 
     QList<ThreatAssessmentParams> getThreatAssessmentParams();
     ThreatAssessmentParams getThreatAssessmentParams(int groupId, int areaId);

@@ -26,6 +26,10 @@ set(SPX_INCLUDES "${CMAKE_SOURCE_DIR}/third_party/spx/Includes")
 set(NEWTRACK_STRUCT_DIR "${CMAKE_SOURCE_DIR}/third_party/NewTrackStruct")
 set(GRPC_ALARM_GEN_DIR "${CMAKE_SOURCE_DIR}/third_party/grpc_alarm/generated")
 set(GRPC_DESTROY_GEN_DIR "${CMAKE_SOURCE_DIR}/third_party/grpc_destroy/generated")
+set(GRPC_TARGET_TYPE_GEN_DIR "${CMAKE_SOURCE_DIR}/third_party/grpc_target_type/generated")
+set(GRPC_SYSTEM_ALARM_GEN_DIR "${CMAKE_SOURCE_DIR}/third_party/grpc_system_alarm/generated")
+set(GRPC_FUSION_TRACK_GEN_DIR "${CMAKE_SOURCE_DIR}/third_party/grpc_fusion_track/generated")
+set(GRPC_NEW_TRACK_STRUCT_GEN_DIR "${CMAKE_SOURCE_DIR}/third_party/grpc_new_track_struct/generated")
 set(GRPC_ROOT "/home/inspur/anaconda3" CACHE PATH "gRPC/protobuf install prefix")
 
 set(ALARM_SOURCES
@@ -36,7 +40,10 @@ set(ALARM_SOURCES
     "${ALARM_SRC_DIR}/common/commonfunc.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/TrackAlarmThread.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/SuspiciousTargetThread.cpp"
+    "${ALARM_SRC_DIR}/dialog/analysis/TargetTypeFusionThread.cpp"
+    "${ALARM_SRC_DIR}/dialog/analysis/TargetTypeFusionLogic.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AlarmFileLogger.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AlarmContentBuilder.cpp"
     "${ALARM_SRC_DIR}/db/DataAccessLayer.cpp"
     "${ALARM_SRC_DIR}/db/DatabaseManager.cpp"
     "${ALARM_SRC_DIR}/db/dbconnectionpool.cpp"
@@ -55,7 +62,10 @@ file(GLOB ALARM_DDS_NEWTRACK_SRC CONFIGURE_DEPENDS
     "${ALARM_SRC_DIR}/fastdds_newtrack/*.cxx")
 
 file(GLOB ALARM_GRPC_SRC CONFIGURE_DEPENDS
-    "${ALARM_SRC_DIR}/grpc_alarm/*.cpp")
+    "${ALARM_SRC_DIR}/grpc_alarm/*.cpp"
+    "${ALARM_SRC_DIR}/grpc_target_type/*.cpp"
+    "${ALARM_SRC_DIR}/grpc_system_alarm/*.cpp"
+    "${ALARM_SRC_DIR}/grpc_track/*.cpp")
 
 set(GRPC_ALARM_GEN_SRC
     "${GRPC_ALARM_GEN_DIR}/alarm_service.pb.cc"
@@ -64,6 +74,22 @@ set(GRPC_ALARM_GEN_SRC
 set(GRPC_DESTROY_GEN_SRC
     "${GRPC_DESTROY_GEN_DIR}/destroy.pb.cc"
     "${GRPC_DESTROY_GEN_DIR}/destroy.grpc.pb.cc")
+
+set(GRPC_TARGET_TYPE_GEN_SRC
+    "${GRPC_TARGET_TYPE_GEN_DIR}/target_type.pb.cc"
+    "${GRPC_TARGET_TYPE_GEN_DIR}/target_type.grpc.pb.cc")
+
+set(GRPC_SYSTEM_ALARM_GEN_SRC
+    "${GRPC_SYSTEM_ALARM_GEN_DIR}/system_alarm.pb.cc"
+    "${GRPC_SYSTEM_ALARM_GEN_DIR}/system_alarm.grpc.pb.cc")
+
+set(GRPC_FUSION_TRACK_GEN_SRC
+    "${GRPC_FUSION_TRACK_GEN_DIR}/fusion_track_stream.pb.cc"
+    "${GRPC_FUSION_TRACK_GEN_DIR}/fusion_track_stream.grpc.pb.cc")
+
+set(GRPC_NEW_TRACK_STRUCT_GEN_SRC
+    "${GRPC_NEW_TRACK_STRUCT_GEN_DIR}/target_stream.pb.cc"
+    "${GRPC_NEW_TRACK_STRUCT_GEN_DIR}/target_stream.grpc.pb.cc")
 
 set(NEWTRACK_STRUCT_GEN_SRC
     "${NEWTRACK_STRUCT_DIR}/NewTrackRealTimeStatusPubSubTypes.cxx"
@@ -77,6 +103,10 @@ add_executable(alarmsys
     ${ALARM_GRPC_SRC}
     ${GRPC_ALARM_GEN_SRC}
     ${GRPC_DESTROY_GEN_SRC}
+    ${GRPC_TARGET_TYPE_GEN_SRC}
+    ${GRPC_SYSTEM_ALARM_GEN_SRC}
+    ${GRPC_FUSION_TRACK_GEN_SRC}
+    ${GRPC_NEW_TRACK_STRUCT_GEN_SRC}
     ${NEWTRACK_STRUCT_GEN_SRC})
 
 target_include_directories(alarmsys PRIVATE
@@ -85,6 +115,10 @@ target_include_directories(alarmsys PRIVATE
     "${NEWTRACK_STRUCT_DIR}"
     "${GRPC_ALARM_GEN_DIR}"
     "${GRPC_DESTROY_GEN_DIR}"
+    "${GRPC_TARGET_TYPE_GEN_DIR}"
+    "${GRPC_SYSTEM_ALARM_GEN_DIR}"
+    "${GRPC_FUSION_TRACK_GEN_DIR}"
+    "${GRPC_NEW_TRACK_STRUCT_GEN_DIR}"
     "${FASTDDS_ROOT}/include"
     "${GRPC_ROOT}/include"
 )
@@ -243,3 +277,42 @@ add_custom_command(TARGET track_field_probe POST_BUILD
         "$<TARGET_FILE_DIR:track_field_probe>/newtrack_sub_recv.xml"
     COMMENT "Copy DDS XML for track_field_probe"
 )
+
+# Linux libpq：AccessMode=1 时由 alarmsys 的 DatabaseManager 走 PgQt；Qt 路径(AccessMode=0)仍保留
+find_path(LIBPQ_INCLUDE_DIR NAMES libpq-fe.h
+    PATHS /usr/include/postgresql /usr/include /usr/local/include)
+find_library(LIBPQ_LIB NAMES pq)
+if(NOT LIBPQ_INCLUDE_DIR OR NOT LIBPQ_LIB)
+    message(WARNING "未找到 libpq（libpq-dev）；AccessMode=1 不可用。安装: apt install libpq-dev")
+else()
+    set(PG_LIBPQ_SOURCES
+        "${ALARM_SRC_DIR}/db/postgres/PgConnectionPool.cpp"
+        "${ALARM_SRC_DIR}/db/postgres/PgDatabaseManager.cpp"
+        "${ALARM_SRC_DIR}/db/postgres/PgHelper.cpp"
+        "${ALARM_SRC_DIR}/db/postgres/PgQtDatabaseManager.cpp"
+    )
+    target_sources(alarmsys PRIVATE ${PG_LIBPQ_SOURCES})
+    target_include_directories(alarmsys PRIVATE "${LIBPQ_INCLUDE_DIR}")
+    target_link_libraries(alarmsys PRIVATE ${LIBPQ_LIB})
+    message(STATUS "alarmsys linked libpq (${LIBPQ_LIB})")
+
+    add_executable(pg_iface_test
+        tools/pg_iface_test.cpp
+        ${PG_LIBPQ_SOURCES}
+    )
+    target_include_directories(pg_iface_test PRIVATE
+        "${ALARM_SRC_DIR}"
+        "${LIBPQ_INCLUDE_DIR}"
+    )
+    target_link_libraries(pg_iface_test PRIVATE
+        Qt5::Core
+        ${LIBPQ_LIB}
+        pthread
+    )
+    set_target_properties(pg_iface_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+        AUTOMOC OFF
+    )
+    message(STATUS "pg_iface_test enabled (libpq=${LIBPQ_LIB})")
+endif()
+

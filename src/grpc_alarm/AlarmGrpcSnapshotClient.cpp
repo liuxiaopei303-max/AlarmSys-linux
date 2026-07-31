@@ -1,6 +1,7 @@
 #include "AlarmGrpcSnapshotClient.hpp"
 
 #include "customconfig.h"
+#include "dialog/alarm/AlarmContentBuilder.h"
 #include "dialog/alarm/AlarmFileLogger.h"
 
 #include <QDateTime>
@@ -104,12 +105,31 @@ AlarmItem buildAlarmItem(const AlarmData& alarmData, CustomConfig* cfg, const QS
     item.add_categories(AlarmCategory::TRACK_AREA);
     item.set_status(lifecycleFromStatus(alarmData.alarm_status));
     item.set_disposition(dispositionFromTaskStatus(alarmData.task_status));
-    item.set_content(
-        QStringLiteral("告警规则:%1 航迹:%2")
-            .arg(alarmData.condition_id)
-            .arg(alarmData.unique_id)
-            .toStdString());
-    item.set_level(threatLevelFromScore(alarmData.threatScore));
+    if (!alarmData.alarm_content.isEmpty()) {
+        item.set_content(alarmData.alarm_content.toStdString());
+    } else if (alarmData.condition_id == QStringLiteral("manual_confirm")) {
+        const bool isAir = cfg && cfg->m_mapManualAlarmAirTrack.value(
+            static_cast<qint64>(alarmData.unique_id), false);
+        item.set_content(buildManualAlarmContent(
+                                cfg,
+                                static_cast<qint64>(alarmData.unique_id),
+                                isAir,
+                                alarmData.targetspeed,
+                                alarmData.targetdir)
+                             .toStdString());
+    } else {
+        item.set_content(
+            QStringLiteral("告警规则:%1 航迹:%2")
+                .arg(alarmData.condition_id)
+                .arg(alarmData.unique_id)
+                .toStdString());
+    }
+    // 人工确认（右键设为蓝方）固定 HIGH，与告警中心「严重」一致
+    if (alarmData.condition_id == QStringLiteral("manual_confirm")) {
+        item.set_level(ThreatLevel::HIGH);
+    } else {
+        item.set_level(threatLevelFromScore(alarmData.threatScore));
+    }
     item.mutable_area()->set_area_id(
         QStringLiteral("%1_%2").arg(alarmData.group_id).arg(alarmData.area_id).toStdString());
     item.mutable_area()->set_area_name(areaName.toStdString());

@@ -12,6 +12,7 @@
 #include <QNetworkReply>
 #include <QSystemSemaphore>
 #include <QObject>
+#include <QThread>
 #include <memory>
 
 #include "SPxLibData/SPxPackets.h"
@@ -26,6 +27,9 @@
 
 class AlarmGrpcSnapshotClient;
 class AlarmGrpcDestroySubscriber;
+class TargetTypeGrpcClient;
+class FusionTrackGrpcClient;
+class NewTrackStructGrpcClient;
 
 class FastddsMsgPublisherApp;
 class FastddsRecognitionPublisherApp;
@@ -398,12 +402,22 @@ public:
     NewTrackStructAlarmPublisherApp* m_suspiciousTargetPublisherMulti = nullptr;
     NewTrackStructAlarmPublisherApp* m_suspiciousTargetPublisherSingle = nullptr;
     NewTrackStructSubscriberApp* m_newTrackStructSubscriber = nullptr;
+    NewTrackStructGrpcClient* m_newTrackStructGrpcClient = nullptr;
+    FusionTrackGrpcClient* m_fusionTrackGrpcClient = nullptr;
     TrackClassSubscriberApp* m_trackSubscriber = nullptr;
     FastddsRecognitionPublisherApp* m_recognitionPublisher = nullptr;
 
     std::unique_ptr<AlarmGrpcSnapshotClient> m_alarmGrpcClient;
     std::unique_ptr<AlarmGrpcDestroySubscriber> m_alarmDestroyGrpcSubscriber;
+    std::unique_ptr<TargetTypeGrpcClient> m_targetTypeGrpcClient;
     qint64 m_lastAlarmGrpcPushMs = 0;
+    /** gRPC 快照独立推送线程（与 processAlarms 解耦，每 1s 推一次） */
+    QThread* m_grpcSnapshotThread = nullptr;
+
+    /** 系统告警 gRPC 服务（SystemAlarmService）：本进程监听，内存收集 */
+    bool m_systemAlarmGrpcEnabled = true;
+    QString m_systemAlarmGrpcListen = QStringLiteral("192.168.18.141");
+    int m_systemAlarmGrpcPort = 25071;
 
     //告警条件列表
     QList<AlarmSettingInfo> m_alarmCondition;
@@ -447,9 +461,15 @@ public:
     void SendAllAlarmEventMsg();
     /** 有告警时每 1s 向 TrackManager 推送 gRPC 告警快照（UpdateAlarmSnapshot） */
     void tickAlarmGrpcSnapshot();
+    /** 启动独立 gRPC 快照定时线程（与 processAlarms 解耦，防止 processAlarms 慢时快照中断） */
+    void startGrpcSnapshotTimer();
+    /** 停止独立 gRPC 快照定时线程 */
+    void stopGrpcSnapshotTimer();
     /** 启动/停止 destroy gRPC 订阅（灭告警，等同 HTTP /api/alarm_filter） */
     void startAlarmDestroyGrpcSubscriber();
     void stopAlarmDestroyGrpcSubscriber();
+    /** 研判后推送目标类型到 TrackManager（UpdateTargetType） */
+    bool pushTargetTypeGrpcUpdate(qint64 targetId, const QString& targetType);
     void SendNewTrackStructAlarmMsg(const AlarmEvent* alarmEvent = nullptr);
     /** 发布可疑目标 TargetOutputSet（不写库、不走 AlarmEvent） */
     /** @return 实际写入 DDS 的目标数，0 表示未发送 */
@@ -460,8 +480,20 @@ public:
     void addAlarmFilter(int type, qint64 targetId); // type: 0-对海 1-对空，target_id 为 unique_id
     /** 该 unique_id 是否已被灭告警（对海/对空任一 type 命中即视为已过滤） */
     bool isUniqueIdAlarmFiltered(qint64 uniqueId);
+    /** 人工确认时若内存航迹已 prune，可用前端附带的运动学兜底建 manual alarm */
+    struct ManualConfirmTrackHint {
+        bool valid = false;
+        bool isAirTrack = false;
+        float latDegs = 0.f;
+        float lonDegs = 0.f;
+        float speedMps = 0.f;
+        float courseDeg = 0.f;
+    };
     /** 人工确认告警：按 unique_id 标记，后续 SendAllAlarmEventMsg 直接 VERIFY_SUCCESS */
-    bool confirmAlarmByUniqueId(qint64 uniqueId, QString* outMessage = nullptr);
+    bool confirmAlarmByUniqueId(
+        qint64 uniqueId,
+        QString* outMessage = nullptr,
+        const ManualConfirmTrackHint* trackHint = nullptr);
     /** 规则告警：task_status + 鉴定/人工确认升级（DDS 与 gRPC 共用） */
     AlarmEffectiveDisposition resolveRuleAlarmDisposition(const AlarmData& alarmData);
     void setTargetType(const QString& id, int type);
