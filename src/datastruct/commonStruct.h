@@ -6,6 +6,7 @@
 #include <QDateTime>
 #include <QUuid>
 #include <QHash>
+#include <QPair>
 #include <QList>
 #include <QSet>
 // #include "udpmanage.h"  // 文件不存在，已移除
@@ -125,7 +126,7 @@ struct AlarmLogicConfig {
     int defaultThreatScore = 90;            /**< 黑名单直告警或未计算威胁度时的默认 threatScore */
 };
 
-/** 可疑目标研判与 DDS 发布（Config.ini [SuspiciousTarget]） */
+/** 可疑目标研判（Config.ini [SuspiciousTarget]）；默认经告警快照嵌入 TargetObject.alarms */
 struct SuspiciousTargetConfig {
     int enabled = 0;                       /**< 0=关闭 SuspiciousTargetThread，1=启用 */
     int judgeIntervalMs = 5000;            /**< 研判周期（毫秒），默认 5s */
@@ -133,7 +134,13 @@ struct SuspiciousTargetConfig {
     double speedHighThresholdMps = 8.0;    /**< 规则2：速度下限（m/s），无需角度条件 */
     double protectAngleMaxDeg = 30.0;      /**< 规则1：航向与指向保护区圆心方位夹角上限（度） */
     int speedCheckClearIntervalMin = 30;   /**< 速度二次确认状态表清空间隔（分钟） */
-    QString ddsTopic = QStringLiteral("NewTrackStructSuspicious"); /**< DDS 发布 topic */
+    /** 1=经 UpdateAlarmSnapshot 写入目标结构 alarms（rule_id=suspicious_target），与真实告警区分 */
+    int embedInTarget = 1;
+    /** 1=额外发布 DDS NewTrackStructSuspicious；默认 0（停 DDS，仅走目标结构） */
+    int publishDds = 0;
+    QString ddsTopic = QStringLiteral("NewTrackStructSuspicious"); /**< DDS 发布 topic（仅 publishDds=1） */
+    /** 嵌入告警快照时使用的 rule_id，Nexus 据此识别可疑、不进告警中心 */
+    QString embedRuleId = QStringLiteral("suspicious_target");
 };
 
 struct BasicConfig
@@ -165,12 +172,28 @@ struct BasicConfig
     QString m_strFusionTrackTransport = QStringLiteral("dds");
     QString m_strNewTrackStructGrpcAddr = QStringLiteral("192.168.18.141:60055");
     /**
-     * 远遥/靖子头雷达：dds | grpc
+     * 远遥等原始航迹：dds | grpc
      * - dds：TrackClassSubscriber（需 TrackEnableOldSubscriber=1）
-     * - grpc：FusionTrackGrpcClient → :60056 筛 yuan_yao/jing_zi_tou
+     * - grpc：FusionTrackGrpcClient → :60056
+     *   总路由 FusionTrackGrpcSourceRoutes；对海 RadarMap 源码见 RadarTrackGrpcSources
      */
     QString m_strRadarTrackTransport = QStringLiteral("dds");
     QString m_strFusionTrackStreamGrpcAddr = QStringLiteral("192.168.18.141:60056");
+    /**
+     * FusionTrack gRPC 总路由：dataSourceId → bucket
+     * bucket: radar | ais | bird | auto_bird | ku_bird
+     * （AlarmSys 无 selfPosMap，自报位不接）
+     */
+    QHash<QString, QString> m_mapFusionTrackGrpcSourceRoute;
+    /**
+     * 仅对海雷达进 m_mapRadarTrack：dataSourceId → code（secondary.reserved[0]）
+     * 源须同时在 routes 且 bucket=radar
+     */
+    QHash<QString, quint32> m_mapRadarTrackGrpcSourceCode;
+    /**
+     * 融合 fusion.trackID[slot] 对应 dataSourceId（与 camServer 对齐，便于后续扩展）
+     */
+    QVector<QPair<int, QString>> m_vRadarFusionTrackIdSlots;
     int m_nRecognitionDDSPort = 142;
     bool m_bDebugMode = false;
     bool m_bUseRemoteCameraControl = false;//设置是否用远程服务控制相机
@@ -878,7 +901,8 @@ struct AISTrack
     unsigned int IMO;
     double draughtMetres;
     unsigned int shipCargoType;
-
+    /** gRPC 摄入时写入，用于过期清理；0=未知（DDS 路径可不填） */
+    int msgTimeSecs = 0;
 };
 
 struct VesselCondition

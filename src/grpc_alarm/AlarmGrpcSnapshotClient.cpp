@@ -207,7 +207,7 @@ QString formatGrpcSnapshotItem(const TargetAlarmRecord& record)
     return QStringLiteral(
                "env=%1 target_id=%2 producer=%3 update_time=%4 "
                "alarm_id=%5 level=%6 status=%7 disposition=%8 "
-               "class_id=%9 behavior_id=%10 lon=%11 lat=%12 bearing_deg=%13 rule=%14 content=%15")
+               "class_id=%9 behavior_id=%10 lon=%11 lat=%12 bearing_deg=%13 rule=%14 content=%15 details=%16")
         .arg(environmentName(record.environment()))
         .arg(QString::fromStdString(record.target_id()))
         .arg(QString::fromStdString(record.producer_id()))
@@ -222,7 +222,8 @@ QString formatGrpcSnapshotItem(const TargetAlarmRecord& record)
         .arg(alarm.position().latitude(), 0, 'f', 6)
         .arg(alarm.spatial_info().bearing_deg(), 0, 'f', 2)
         .arg(ruleId)
-        .arg(QString::fromStdString(alarm.content()));
+        .arg(QString::fromStdString(alarm.content()))
+        .arg(QString::fromStdString(alarm.resolution_details()));
 }
 
 void logGrpcSnapshotRequest(const AlarmSnapshotRequest& request)
@@ -391,6 +392,69 @@ bool AlarmGrpcSnapshotClient::pushSnapshot(CustomConfig* cfg)
                 dedup.insert(key, record);
             }
         }
+    }
+
+    // 可疑目标：嵌入 TargetObject.alarms（rule_id=suspicious_target），与真实告警区分
+    if (cfg->m_suspiciousTarget.embedInTarget) {
+        const QString ruleId = cfg->m_suspiciousTarget.embedRuleId.trimmed().isEmpty()
+            ? QStringLiteral("suspicious_target")
+            : cfg->m_suspiciousTarget.embedRuleId.trimmed();
+        const QSet<QString> seaIds = cfg->suspiciousSeaUniqueIds();
+        const QSet<QString> airIds = cfg->suspiciousAirUniqueIds();
+
+        auto enrichOrCreate = [&](const QSet<QString>& ids, EnvironmentType env) {
+            for (const QString& tid : ids) {
+                const QString targetId = tid.trimmed();
+                if (targetId.isEmpty() || !targetId.at(0).isDigit()) {
+                    continue;
+                }
+                SnapshotKey key;
+                key.environment = static_cast<int>(env);
+                key.targetId = targetId;
+
+                if (dedup.contains(key)) {
+                    AlarmItem* item = dedup[key].mutable_alarm();
+                    bool hasRule = false;
+                    for (int i = 0; i < item->rule_ids_size(); ++i) {
+                        if (QString::fromStdString(item->rule_ids(i)) == ruleId) {
+                            hasRule = true;
+                            break;
+                        }
+                    }
+                    if (!hasRule) {
+                        item->add_rule_ids(ruleId.toStdString());
+                    }
+                    // 真实告警只追加 rule_id，不覆盖 resolution_details
+                    continue;
+                }
+
+                TargetAlarmRecord record;
+                record.set_environment(env);
+                record.set_target_id(targetId.toStdString());
+                record.set_producer_id(m_producerId);
+                record.set_update_time(nowSec);
+
+                AlarmItem item;
+                item.set_alarm_id(QStringLiteral("suspicious_%1").arg(targetId).toStdString());
+                item.add_categories(AlarmCategory::CUSTOM1);
+                item.set_status(AlarmLifecycleStatus::ACTIVE);
+                item.set_disposition(AlarmDispositionStatus::UNASSIGNED);
+                item.set_content(QStringLiteral("SuspiciousTarget").toStdString());
+                item.set_level(ThreatLevel::MEDIUM);
+                item.set_raised_time(nowSec);
+                item.set_updated_time(nowSec);
+                item.set_resolved_time(0.0);
+                // TrackManager 只原样转发 AlarmItem；is_suspicious 落在 resolution_details / rule_ids
+                item.set_resolution_details("is_suspicious");
+                item.add_rule_ids(ruleId.toStdString());
+                item.set_detection_box_set(false);
+                *record.mutable_alarm() = item;
+                dedup.insert(key, record);
+            }
+        };
+
+        enrichOrCreate(seaIds, EnvironmentType::SURFACE);
+        enrichOrCreate(airIds, EnvironmentType::AIR);
     }
 
     for (const TargetAlarmRecord& record : dedup) {

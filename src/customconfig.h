@@ -295,6 +295,13 @@ public:
     QStringList m_listTemplateTbl;  //采集-模板
     QStringList m_listHistoryTbl;  //采集-历史任务
     QMap<int, SPxPacketTrackExtended> m_mapRadarTrack;
+    /** gRPC 主键 uniqueId；查表兼容本地批号 norm.min.id；secondary.reserved[0]=source code */
+    static quint32 radarDataSourceCode(const SPxPacketTrackExtended& track);
+    static void setRadarDataSourceCode(SPxPacketTrackExtended& track, quint32 sourceCode);
+    bool hasRadarTrack(int id, quint32 sourceCode = 0) const;
+    SPxPacketTrackExtended radarTrackValue(int id, quint32 sourceCode = 0) const;
+    bool tryGetRadarTrack(int id, SPxPacketTrackExtended* out, quint32 sourceCode = 0) const;
+    bool tryGetRadarTrackBySourceId(int id, const QString& dataSourceId, SPxPacketTrackExtended* out) const;
     QMap<int, SPxPacketTrackExtended> m_mapMillRadarTrack;
     QMap<qint64, SPxPacketTrackExtended> m_mapFuseTrack;
     QMap<qint64, SPxPacketTrackExtended> m_mapBirdFuseTrack;
@@ -330,6 +337,10 @@ public:
     /** manual 告警 unique_id -> 是否对空航迹（决定 TrackType::BIRD / FUSE） */
     QMap<qint64, bool> m_mapManualAlarmAirTrack;
     QMap<QString, AlarmData> m_mapAlarmData; //告警数据
+    /** 可疑目标 unique_id（对海 SURFACE / 对空 AIR），供告警快照嵌入；由 SuspiciousTargetThread 全量刷新 */
+    QSet<QString> m_suspiciousSeaUniqueIds;
+    QSet<QString> m_suspiciousAirUniqueIds;
+    mutable QMutex m_suspiciousIdsMutex;
     /** condition_id + "_" + track_id -> 最近一次触发告警的毫秒时间戳；持续告警判定用，避免 m_mapAlarmData 被提前清理后查不到 */
     QMap<QString, qint64> m_mapConditionTrackLastAlarmMs;
     QList<ThreatAssessmentParams> m_listThreatAssessmentParams; //威胁度研判参数
@@ -389,6 +400,8 @@ public:
     DataAccessLayer& dbHelper = DataAccessLayer::getInstance();
     bool m_dbInitSuccess = false;
     bool m_bFastDDSInitialized = false; // 标记FastDDS是否成功初始化
+    /** Config.ini [DDS] PublishAlarmEventDds：1=发布 AlarmEvent/NewTrackStructAlarm DDS；0=仅 gRPC 快照 */
+    bool m_bPublishAlarmEventDds = false;
     QList<TargetInfo> m_listTargetInfo;
     QMap<int, QString> m_sensorInfoMap;
 
@@ -471,9 +484,16 @@ public:
     /** 研判后推送目标类型到 TrackManager（UpdateTargetType） */
     bool pushTargetTypeGrpcUpdate(qint64 targetId, const QString& targetType);
     void SendNewTrackStructAlarmMsg(const AlarmEvent* alarmEvent = nullptr);
-    /** 发布可疑目标 TargetOutputSet（不写库、不走 AlarmEvent） */
-    /** @return 实际写入 DDS 的目标数，0 表示未发送 */
+    /**
+     * 更新可疑目标集合，并按配置决定是否发布 DDS。
+     * embedInTarget=1 时集合供 AlarmGrpcSnapshotClient 写入 TargetObject.alarms。
+     * @return DDS 实际发送目标数（publishDds=0 时恒为 0）
+     */
     int SendSuspiciousTargetMsg(const QSet<QString>& suspiciousUniqueIds);
+    /** 覆盖对海/对空可疑 unique_id（全量替换；可为空表示清空） */
+    void setSuspiciousUniqueIds(const QSet<QString>& seaIds, const QSet<QString>& airIds);
+    QSet<QString> suspiciousSeaUniqueIds() const;
+    QSet<QString> suspiciousAirUniqueIds() const;
     /** true：完整组装并发布（SendAllAlarmEventMsg 全逻辑）；false：仅向 DDS 发空 AlarmEvent，不做全量告警组装 */
     bool alarmEventPushFullEnabled() const;
     void setAlarmEventPushFullEnabled(bool on);

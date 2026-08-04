@@ -357,7 +357,7 @@ void SuspiciousTargetThread::processSuspiciousTargets()
         airFuseTrackMap = gConfig->m_mapBirdFuseTrack;
     }
 
-    QSet<QString> suspiciousIds;
+    QSet<QString> suspiciousSeaIds;
     for (auto it = seaFuseTrackMap.constBegin(); it != seaFuseTrackMap.constEnd(); ++it) {
         evaluateTrack(
             it.key(),
@@ -366,12 +366,13 @@ void SuspiciousTargetThread::processSuspiciousTargets()
             cfg,
             &m_mapSpeedLowLastCheckSea,
             &m_mapSpeedHighLastCheckSea,
-            &suspiciousIds);
+            &suspiciousSeaIds);
     }
 
     const AlarmLogicConfig& alBird = gConfig->m_alarmLogic;
     int airDroneCount = 0;
     int airBirdFilteredCount = 0;
+    QSet<QString> suspiciousAirIds;
     for (auto it = airFuseTrackMap.constBegin(); it != airFuseTrackMap.constEnd(); ++it) {
         if (!isAirDroneTrack(it.value())) {
             continue;
@@ -390,18 +391,23 @@ void SuspiciousTargetThread::processSuspiciousTargets()
             cfg,
             &m_mapSpeedLowLastCheckAir,
             &m_mapSpeedHighLastCheckAir,
-            &suspiciousIds);
+            &suspiciousAirIds);
     }
 
-    if (!suspiciousIds.isEmpty()) {
-        const int sentCount = gConfig->SendSuspiciousTargetMsg(suspiciousIds);
-        qDebug() << "SuspiciousTargetThread: candidates=" << suspiciousIds.size()
-                 << "ddsSent=" << sentCount
-                 << "seaFuse=" << seaFuseTrackMap.size()
-                 << "airDrone=" << airDroneCount
-                 << "airBirdFiltered=" << airBirdFilteredCount
-                 << "topic=" << cfg.ddsTopic;
-    }
+    // 全量刷新（可为空），供 UpdateAlarmSnapshot 嵌入 TargetObject.alarms
+    gConfig->setSuspiciousUniqueIds(suspiciousSeaIds, suspiciousAirIds);
+
+    QSet<QString> allIds = suspiciousSeaIds;
+    allIds.unite(suspiciousAirIds);
+    const int ddsSent = cfg.publishDds ? gConfig->SendSuspiciousTargetMsg(allIds) : 0;
+    qDebug() << "SuspiciousTargetThread: sea=" << suspiciousSeaIds.size()
+             << "air=" << suspiciousAirIds.size()
+             << "embed=" << cfg.embedInTarget
+             << "ddsSent=" << ddsSent
+             << "seaFuse=" << seaFuseTrackMap.size()
+             << "airDrone=" << airDroneCount
+             << "airBirdFiltered=" << airBirdFilteredCount
+             << "topic=" << cfg.ddsTopic;
 }
 
 void SuspiciousTargetThread::run()

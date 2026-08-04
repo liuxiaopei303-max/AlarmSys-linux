@@ -6,7 +6,7 @@
 #include <memory>
 #include <thread>
 
-/** FusionTrack gRPC(:60056)：yuan_yao/jing_zi_tou → m_mapRadarTrack */
+/** FusionTrack gRPC(:60056)：按 FusionTrackGrpcSourceRoutes 分发；对海 RadarMap 主键 uniqueId */
 class FusionTrackGrpcClient
 {
 public:

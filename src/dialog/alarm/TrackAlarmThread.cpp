@@ -668,7 +668,23 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 			}
 			else if(type == 1)
 			{
-				if (!m_mapRadarTrack.contains(candidateTrackId)) {
+				SPxPacketTrackExtended radarHit;
+				bool foundRadar = false;
+				if (m_mapRadarTrack.contains(candidateTrackId)) {
+					radarHit = m_mapRadarTrack.value(candidateTrackId);
+					foundRadar = true;
+				} else {
+					const auto uid = static_cast<uint32_t>(candidateTrackId);
+					const auto localId = static_cast<uint32_t>(candidateTrackId);
+					for (auto it = m_mapRadarTrack.constBegin(); it != m_mapRadarTrack.constEnd(); ++it) {
+						if (it.value().secondary.uniqueID == uid || it.value().norm.min.id == localId) {
+							radarHit = it.value();
+							foundRadar = true;
+							break;
+						}
+					}
+				}
+				if (!foundRadar) {
 					logAlarmTraceThrottled(
 						QStringLiteral("upd_skip_radar_%1").arg(candidateTrackId),
 						QStringLiteral("updataAlarmTrackToDB skip------trackId:%1 reason:not_in_radar_map conditionId:%2")
@@ -677,11 +693,27 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 						10000);
 					continue;
 				}
-				track = m_mapRadarTrack[candidateTrackId];
+				track = radarHit;
 			}
 			else if (type == 3)
 			{
-				if (!m_mapBirdRadarTrack.contains(candidateTrackId)) {
+				SPxPacketTrackExtended birdHit;
+				bool foundBird = false;
+				if (m_mapBirdRadarTrack.contains(candidateTrackId)) {
+					birdHit = m_mapBirdRadarTrack.value(candidateTrackId);
+					foundBird = true;
+				} else {
+					const auto uid = static_cast<uint32_t>(candidateTrackId);
+					const auto localId = static_cast<uint32_t>(candidateTrackId);
+					for (auto it = m_mapBirdRadarTrack.constBegin(); it != m_mapBirdRadarTrack.constEnd(); ++it) {
+						if (it.value().secondary.uniqueID == uid || it.value().norm.min.id == localId) {
+							birdHit = it.value();
+							foundBird = true;
+							break;
+						}
+					}
+				}
+				if (!foundBird) {
 					logAlarmTraceThrottled(
 						QStringLiteral("upd_skip_bird_%1").arg(candidateTrackId),
 						QStringLiteral("updataAlarmTrackToDB skip------trackId:%1 reason:not_in_bird_fuse_map conditionId:%2 birdMapSize:%3")
@@ -691,7 +723,7 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 						10000);
 					continue;
 				}
-				track = m_mapBirdRadarTrack[candidateTrackId];
+				track = birdHit;
 				{
 					const int fusionTid0 = static_cast<int>(track.fusion.trackID[0]);
 					const int fusionTid1 = static_cast<int>(track.fusion.trackID[1]);
