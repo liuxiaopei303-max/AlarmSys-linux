@@ -31,6 +31,7 @@ QString targetTypeToChinese(const QString& raw)
         {QStringLiteral("missle"), QStringLiteral("巡飞弹")},
         {QStringLiteral("bird"), QStringLiteral("鸟类")},
         {QStringLiteral("aircraft"), QStringLiteral("飞机")},
+        {QStringLiteral("other"), QStringLiteral("其他目标")},
         {QStringLiteral("unknown"), QStringLiteral("未知目标")},
     };
     const QString key = raw.trimmed().toLower();

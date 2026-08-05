@@ -2,6 +2,7 @@
 #include "AlarmContentBuilder.h"
 #include "AlarmFileLogger.h"
 #include "alarm_geoproj.h"
+#include "grpc_alarm/AlarmGrpcSnapshotMapping.h"
 #include <QDebug>
 #include "common/commonfunc.h"
 #include <QHash>
@@ -249,52 +250,26 @@ void TrackAlarmThread::run()
 		gConfig->SendAllAlarmEventMsg();
 		// tickAlarmGrpcSnapshot 已移至独立线程（startGrpcSnapshotTimer），此处不再调用
 		// gConfig->tickAlarmGrpcSnapshot();
-		QMap<QString, AlarmData>::iterator it = gConfig->m_mapAlarmData.end();
-
-		// 先检查是否为空
-		if (gConfig->m_mapAlarmData.isEmpty()) {
-			// 处理空容器的情况
-			msleep(100); // 每3秒检查一次
-			continue; // 或其他适当的处理方式
-		}
-
-		// 先将迭代器移动到最后一个有效元素
-		it--;
-
-		while (it != gConfig->m_mapAlarmData.begin())
+		// 热更新、人工确认和 gRPC 快照线程都会访问 m_mapAlarmData。旧实现未加锁
+		// 并在 remove() 前反向移动 QMap 迭代器；方案快速切换时容器被并发 clear，
+		// 迭代器会失效并永久卡在 QMapNodeBase::previousNode()。统一在同一互斥量
+		// 下正向 erase，既避免数据竞争，也不依赖删除节点后的前驱指针。
 		{
-			
-			qint64 time_now = QDateTime::currentDateTime().toMSecsSinceEpoch();
-			qint64 time_alarm = QDateTime::fromString(it.value().time, "yyyy-MM-dd hh:mm:ss.zzz").toMSecsSinceEpoch();
-			if (time_now - time_alarm > gConfig->m_alarmLogic.alarmMapPruneNonFirstStaleMs)
-			{
-					
-				it.value().alarm_status = 1;
-				QString alarmID = it.value().alarm_id;
-				it--;
-				//bool success = gConfig->dbHelper.updateAlarmData(it.value().alarm_id, it.value());
-				gConfig->m_mapAlarmData.remove(alarmID);
-			}
-			else
-			{
-				it--;
-			}
-			
-			
-		}
-
-
-		if (it == gConfig->m_mapAlarmData.begin())
-		{
-			qint64 time_now = QDateTime::currentDateTime().toMSecsSinceEpoch();
-			qint64 time_alarm = QDateTime::fromString(it.value().time, "yyyy-MM-dd hh:mm:ss.zzz").toMSecsSinceEpoch();
-			if (time_now - time_alarm > gConfig->m_alarmLogic.alarmMapPruneNonFirstStaleMs)
-			{
-
-				it.value().alarm_status = 1;
-				QString alarmID = it.value().alarm_id;
-				//bool success = gConfig->dbHelper.updateAlarmData(it.value().alarm_id, it.value());
-				gConfig->m_mapAlarmData.remove(alarmID);
+			QMutexLocker alarmDataLocker(&gConfig->m_alarmDataMutex);
+			const qint64 timeNow = QDateTime::currentMSecsSinceEpoch();
+			for (auto it = gConfig->m_mapAlarmData.begin();
+				 it != gConfig->m_mapAlarmData.end();) {
+				const qint64 timeAlarm = QDateTime::fromString(
+					it.value().time, QStringLiteral("yyyy-MM-dd hh:mm:ss.zzz"))
+					.toMSecsSinceEpoch();
+				const qint64 staleMs =
+					gConfig->m_alarmLogic.alarmMapPruneNonFirstStaleMs;
+				if (timeAlarm > 0 && timeNow - timeAlarm > staleMs) {
+					it.value().alarm_status = 1;
+					it = gConfig->m_mapAlarmData.erase(it);
+				} else {
+					++it;
+				}
 			}
 		}
 
@@ -302,7 +277,7 @@ void TrackAlarmThread::run()
 	}
 }
 
-void TrackAlarmThread::SaveToDB(AlarmRule info, qint64 targetId, float lat, float lon, float speed, float dir, float dis, int TargetType, int threatScore, int timestampSec, int radarSourceId, const QString& alarmContent)
+void TrackAlarmThread::SaveToDB(AlarmRule info, qint64 targetId, float lat, float lon, float speed, float dir, float dis, int TargetType, int threatScore, int timestampSec, int radarSourceId, const QString& alarmContent, int eventStage)
 {
 	if (targetId <= 0) {
 		logAlarmTrace(QStringLiteral("SaveToDB skip invalid target_id------targetId:%1 conditionId:%2")
@@ -418,6 +393,8 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, qint64 targetId, float lat, floa
 		newAlarm.time = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz");
 		newAlarm.origintime = buildOriginTime();
 		newAlarm.alarm_status = 0;
+		// 旧规则路径调用默认值 3，代表已形成正式告警；三态路径显式传入真实阶段。
+		newAlarm.event_stage = eventStage;
 		newAlarm.alarm_content = alarmContent;
 		newAlarm.threat_time_ms = al.originTimeFromTrackMsg
 			? (al.originTrackTimeIsMs ? static_cast<qint64>(timestampSec)
@@ -452,6 +429,7 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, qint64 targetId, float lat, floa
 			sendAlarm.targetspeed = speed;
 			sendAlarm.alarm_count += 1;
 			sendAlarm.threatScore = threatScore;
+			sendAlarm.event_stage = qMax(sendAlarm.event_stage, eventStage);
 			sendAlarm.unique_id = targetId;
 			sendAlarm.track_id = 0;
 			if (radarSourceId != 0)
@@ -1456,6 +1434,710 @@ void TrackAlarmThread::getAlarmArea()
 	if (m_maparea.contains(2))
 		m_listGroupArea.append(m_maparea.value(2));
 }
+
+QString escalationSourceRuleId(const AlarmRule& rule)
+{
+	const QString prefix = QStringLiteral("threat_rule_%1_%2_")
+		.arg(rule.group_id)
+		.arg(rule.area_id);
+	if (rule.condition_id.startsWith(prefix))
+		return rule.condition_id.mid(prefix.size());
+	return rule.condition_id;
+}
+
+QString escalationLaneKey(int trackType, const QString& sourceRuleId)
+{
+	return QStringLiteral("%1|%2").arg(trackType).arg(sourceRuleId);
+}
+
+QString escalationTrackStateKey(
+	AreaEscalationEvaluator::TargetDomain domain,
+	const QString& laneId,
+	qint64 targetId)
+{
+	return QStringLiteral("%1|%2|%3")
+		.arg(static_cast<int>(domain))
+		.arg(laneId)
+		.arg(targetId);
+}
+
+QString escalationDomainName(AreaEscalationEvaluator::TargetDomain domain)
+{
+	return domain == AreaEscalationEvaluator::TargetDomain::Air
+		? QStringLiteral("AIR") : QStringLiteral("SURFACE");
+}
+
+bool TrackAlarmThread::findAlarmArea(int groupId, int areaId, AlarmArea* out) const
+{
+	if (out == nullptr || !m_maparea.contains(groupId))
+		return false;
+	for (const AlarmArea& area : m_maparea.value(groupId)) {
+		if (area.areaID == areaId) {
+			*out = area;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool TrackAlarmThread::containsCurrentPoint(const AlarmArea& area, const QPointF& point) const
+{
+	switch (area.m_alertAreaType) {
+	case 1:
+		return area.m_alertAreaRect.normalized().contains(point);
+	case 2: {
+		const double radius = CommonFunc::GetDistance2(
+			area.m_startP.x(), area.m_startP.y(), area.m_endP.x(), area.m_endP.y());
+		const double distance = CommonFunc::GetDistance2(
+			area.m_startP.x(), area.m_startP.y(), point.x(), point.y());
+		return distance <= radius;
+	}
+	case 3:
+		return area.m_alertAreaPolygon.containsPoint(point, Qt::OddEvenFill);
+	default:
+		return false;
+	}
+}
+
+AreaEscalationEvaluator::AreaDefinition TrackAlarmThread::toEscalationArea(
+	const AlarmArea& area) const
+{
+	AreaEscalationEvaluator::AreaDefinition out;
+	out.key = {area.groupID, area.areaID};
+	out.name = area.areaName;
+	switch (area.m_alertAreaType) {
+	case 1:
+		out.shape = AreaEscalationEvaluator::Shape::Rectangle;
+		out.rectangle = area.m_alertAreaRect.normalized();
+		break;
+	case 2:
+		out.shape = AreaEscalationEvaluator::Shape::Circle;
+		out.circleCenter = area.m_startP;
+		out.circleRadius = CommonFunc::GetDistance2(
+			area.m_startP.x(), area.m_startP.y(), area.m_endP.x(), area.m_endP.y());
+		out.geographic = true;
+		break;
+	case 3:
+		out.shape = AreaEscalationEvaluator::Shape::Polygon;
+		out.polygon = area.m_alertAreaPolygon;
+		break;
+	default:
+		out.shape = AreaEscalationEvaluator::Shape::Invalid;
+		break;
+	}
+	return out;
+}
+
+bool TrackAlarmThread::configureAreaEscalation(const QList<AlarmRule>& rules)
+{
+	if (m_areaEscalationGeneration == gConfig->m_alarmConfigGeneration)
+		return m_areaEscalationActive;
+
+	m_areaEscalationGeneration = gConfig->m_alarmConfigGeneration;
+	m_areaEscalationActive = false;
+	m_areaEscalationBindings.clear();
+	m_areaEscalationClaimedConditionIds.clear();
+	m_areaEscalationPreviousSpeed.clear();
+
+	if (!gConfig->m_areaEscalation.enabled) {
+		AreaEscalationEvaluator::PolicyDefinition disabled;
+		m_areaEscalationEvaluator.reset(disabled);
+		qInfo() << "AreaEscalation disabled by configuration";
+		return false;
+	}
+
+	QMap<QString, QList<AlarmRule>> warningAreas;
+	QMap<QString, QList<AlarmRule>> alarmAreas;
+	for (const AlarmRule& rule : rules) {
+		if (!rule.alarmstate || rule.group_id < 0 || rule.area_id < 0)
+			continue;
+		const QString key = QStringLiteral("%1/%2").arg(rule.group_id).arg(rule.area_id);
+		if (rule.alarm_level == 2)
+			warningAreas[key].append(rule);
+		else if (rule.alarm_level == 3)
+			alarmAreas[key].append(rule);
+	}
+
+	// 旧方案可能只有历史 alarm_level=2 或 alarm_level=3；继续使用旧规则路径。
+	if (warningAreas.isEmpty() || alarmAreas.isEmpty()) {
+		AreaEscalationEvaluator::PolicyDefinition disabled;
+		m_areaEscalationEvaluator.reset(disabled);
+		qInfo().noquote() << QStringLiteral(
+			"AreaEscalation legacy compatibility mode warningAreaCount=%1 alarmAreaCount=%2 generation=%3")
+			.arg(warningAreas.size()).arg(alarmAreas.size()).arg(m_areaEscalationGeneration);
+		return false;
+	}
+
+	auto fail = [&](const QString& reason) {
+		AreaEscalationEvaluator::PolicyDefinition invalid;
+		m_areaEscalationEvaluator.reset(invalid);
+		m_areaEscalationBindings.clear();
+		m_areaEscalationClaimedConditionIds.clear();
+		qCritical().noquote() << QStringLiteral(
+			"AreaEscalation 多区域策略失败，安全回退旧逻辑: %1 warningAreaCount=%2 alarmAreaCount=%3")
+			.arg(reason).arg(warningAreas.size()).arg(alarmAreas.size());
+		AlarmFileLogger::logNewAlarmTrack(
+			QStringLiteral("AreaEscalation policy invalid------reason:%1 warningAreaCount:%2 alarmAreaCount:%3")
+				.arg(reason).arg(warningAreas.size()).arg(alarmAreas.size()));
+		return false;
+	};
+
+	AreaEscalationEvaluator::PolicyDefinition policy;
+	policy.enabled = true;
+	policy.dwellMs = 7000;
+	QSet<QString> bindingKeys;
+	QStringList bindingDescriptions;
+
+	auto appendRole = [&](const QMap<QString, QList<AlarmRule>>& areas,
+		AreaEscalationEvaluator::AreaRole role) -> bool {
+		for (auto areaIt = areas.constBegin(); areaIt != areas.constEnd(); ++areaIt) {
+			const QList<AlarmRule>& areaRules = areaIt.value();
+			if (areaRules.isEmpty())
+				return fail(QStringLiteral("区域 %1 未绑定规则").arg(areaIt.key()));
+			AlarmArea alarmArea;
+			if (!findAlarmArea(areaRules.first().group_id, areaRules.first().area_id, &alarmArea))
+				return fail(QStringLiteral("区域 %1 几何未加载").arg(areaIt.key()));
+			const AreaEscalationEvaluator::AreaDefinition definition = toEscalationArea(alarmArea);
+			if (!definition.isValid())
+				return fail(QStringLiteral("区域 %1 几何无效").arg(areaIt.key()));
+			if (role == AreaEscalationEvaluator::AreaRole::Warning)
+				policy.warningAreas.append(definition);
+			else
+				policy.alarmAreas.append(definition);
+
+			for (const AlarmRule& rule : areaRules) {
+				if (rule.track_type != 0 && rule.track_type != 3)
+					return fail(QStringLiteral("区域 %1 含不支持 track_type=%2 condition=%3")
+						.arg(areaIt.key()).arg(rule.track_type).arg(rule.condition_id));
+				if (!(0 <= rule.threat_level1 && rule.threat_level1 < rule.threat_level2
+					  && rule.threat_level2 <= 100)) {
+					return fail(QStringLiteral("区域 %1 阈值无效 condition=%2 threshold=%3/%4")
+						.arg(areaIt.key(), rule.condition_id)
+						.arg(rule.threat_level1).arg(rule.threat_level2));
+				}
+				const QString bindingKey = QStringLiteral("%1|%2")
+					.arg(areaIt.key()).arg(rule.track_type);
+				if (bindingKeys.contains(bindingKey))
+					return fail(QStringLiteral("同一区域同一 track_type 只能绑定一条规则: %1")
+						.arg(bindingKey));
+				bindingKeys.insert(bindingKey);
+
+				AreaEscalationBinding binding;
+				binding.area = definition;
+				binding.runtimeArea = alarmArea;
+				binding.role = role;
+				binding.domain = rule.track_type == 3
+					? AreaEscalationEvaluator::TargetDomain::Air
+					: AreaEscalationEvaluator::TargetDomain::Surface;
+				binding.laneId = escalationDomainName(binding.domain);
+				binding.trackType = rule.track_type;
+				binding.rule = rule;
+				m_areaEscalationBindings.append(binding);
+				m_areaEscalationClaimedConditionIds.insert(rule.condition_id);
+				bindingDescriptions.append(QStringLiteral("%1:%2:%3:%4/%5")
+					.arg(role == AreaEscalationEvaluator::AreaRole::Warning
+						? QStringLiteral("A") : QStringLiteral("B"),
+						definition.key.toString(), binding.laneId)
+					.arg(rule.threat_level1).arg(rule.threat_level2));
+			}
+		}
+		return true;
+	};
+
+	if (!appendRole(warningAreas, AreaEscalationEvaluator::AreaRole::Warning)
+		|| !appendRole(alarmAreas, AreaEscalationEvaluator::AreaRole::Alarm)) {
+		return false;
+	}
+	if (m_areaEscalationBindings.isEmpty())
+		return fail(QStringLiteral("多区域策略未形成任何规则绑定"));
+	policy.warningArea = policy.warningAreas.first();
+	policy.alarmArea = policy.alarmAreas.first();
+
+	QString error;
+	if (!m_areaEscalationEvaluator.reset(policy, &error))
+		return fail(error);
+	m_areaEscalationActive = true;
+	QStringList warningKeys;
+	QStringList alarmKeys;
+	for (const auto& area : policy.warningAreas) warningKeys.append(area.key.toString());
+	for (const auto& area : policy.alarmAreas) alarmKeys.append(area.key.toString());
+	qInfo().noquote() << QStringLiteral(
+		"AreaEscalation 多区域策略成功 A=[%1] B=[%2] bindings=[%3] generation=%4")
+		.arg(warningKeys.join(QLatin1Char(',')), alarmKeys.join(QLatin1Char(',')),
+			 bindingDescriptions.join(QLatin1Char(',')))
+		.arg(m_areaEscalationGeneration);
+	AlarmFileLogger::logNewAlarmTrack(QStringLiteral(
+		"AreaEscalation policy ready------A:[%1] B:[%2] bindings:[%3] generation:%4")
+		.arg(warningKeys.join(QLatin1Char(',')), alarmKeys.join(QLatin1Char(',')),
+			 bindingDescriptions.join(QLatin1Char(',')))
+		.arg(m_areaEscalationGeneration));
+	return true;
+}
+
+AreaEscalationEvaluator::AreaEvidence TrackAlarmThread::evaluateAreaEscalationEvidence(
+	const AlarmRule& rule,
+	const SPxPacketTrackExtended& track,
+	const DataAccessLayer::DetectionTypeResult& detection,
+	bool previousSpeedPassed,
+	bool insideArea)
+{
+	AreaEscalationEvaluator::AreaEvidence evidence;
+	evidence.available = insideArea;
+	evidence.conditionId = rule.condition_id;
+	if (!insideArea)
+		return evidence;
+
+	QStringList failures;
+	auto reject = [&](bool* field, const QString& reason) {
+		*field = false;
+		failures.append(reason);
+	};
+
+	const double speed = track.norm.min.speedMps;
+	bool currentSpeedPassed = true;
+	if (rule.speed_condition == 1)
+		currentSpeedPassed = speed < rule.speed;
+	else if (rule.speed_condition == 2)
+		currentSpeedPassed = speed > rule.speed;
+	if (!currentSpeedPassed)
+		reject(&evidence.hard.speed, QStringLiteral("speed"));
+	if (rule.speed_condition > 0 && !(previousSpeedPassed && currentSpeedPassed))
+		reject(&evidence.hard.speedDoubleCheck, QStringLiteral("speed_double_check"));
+
+	if (rule.height_min != rule.height_max
+		&& (track.altitudeMetres < rule.height_min || track.altitudeMetres > rule.height_max)) {
+		reject(&evidence.hard.height, QStringLiteral("height"));
+	}
+
+	bool hasProtectArea = false;
+	QPointF protectCenter;
+	AlarmArea protectArea;
+	const QString areaKey = QStringLiteral("%1_%2").arg(rule.group_id).arg(rule.area_id);
+	if (gConfig->m_mapSchemeProtectAreas.contains(areaKey)) {
+		const QPair<int, int> protectKey = gConfig->m_mapSchemeProtectAreas.value(areaKey);
+		if (findAlarmArea(protectKey.first, protectKey.second, &protectArea)
+			&& protectArea.m_alertAreaType == 2) {
+			hasProtectArea = true;
+			protectCenter = protectArea.m_startP; // 数据库保护区几何圆心，禁止硬编码
+		}
+	}
+
+	double angleToCheck = track.norm.min.courseDegrees;
+	if (hasProtectArea) {
+		const double bearingToCenter = calculateBearing(
+			track.latDegs, track.longDegs, protectCenter.x(), protectCenter.y());
+		angleToCheck = std::abs(track.norm.min.courseDegrees - bearingToCenter);
+		if (angleToCheck > 180.0)
+			angleToCheck = 360.0 - angleToCheck;
+	}
+	if (rule.course_min != rule.course_max) {
+		const bool anglePassed = rule.course_min <= rule.course_max
+			? (angleToCheck >= rule.course_min && angleToCheck <= rule.course_max)
+			: (angleToCheck >= rule.course_min || angleToCheck <= rule.course_max);
+		if (!anglePassed)
+			reject(&evidence.hard.entryAngle, QStringLiteral("entry_angle"));
+	}
+
+	if (rule.dist_to_protect_area >= 0 && hasProtectArea) {
+		const double centerDistance = CommonFunc::GetDistance(
+			track.longDegs, track.latDegs, protectCenter.y(), protectCenter.x());
+		const double protectRadius = CommonFunc::GetDistance(
+			protectArea.m_startP.y(), protectArea.m_startP.x(),
+			protectArea.m_endP.y(), protectArea.m_endP.x());
+		const double edgeDistance = std::max(0.0, centerDistance - protectRadius);
+		if (edgeDistance >= rule.dist_to_protect_area)
+			reject(&evidence.hard.protectDistance, QStringLiteral("protect_distance"));
+	}
+	if (rule.entry_time > 0 && hasProtectArea) {
+		const double protectRadius = CommonFunc::GetDistance(
+			protectArea.m_startP.y(), protectArea.m_startP.x(),
+			protectArea.m_endP.y(), protectArea.m_endP.x());
+		const double seconds = calculateTimeToProtectArea(track, protectCenter, protectRadius);
+		if (seconds < 0.0 || seconds > rule.entry_time * 60.0)
+			reject(&evidence.hard.entryTime, QStringLiteral("entry_time"));
+	}
+
+	const qint64 targetId = track.secondary.uniqueID > 0
+		? static_cast<qint64>(track.secondary.uniqueID)
+		: static_cast<qint64>(track.norm.min.id);
+	const int filterKey = targetId > 0 && targetId <= std::numeric_limits<int>::max()
+		? static_cast<int>(targetId) : 0;
+	if (filterKey > 0 && gConfig->m_mapTargetInfoFilter.contains(filterKey)) {
+		const TargetInfoFilter attrs = gConfig->m_mapTargetInfoFilter.value(filterKey);
+		if (rule.whitelist_judge == 1 && attrs.black_white_attr != 1)
+			reject(&evidence.hard.targetAttributes, QStringLiteral("whitelist"));
+		if (rule.affiliation_judge > 0
+			&& (rule.affiliation_judge & (1 << attrs.affiliation_attr)) == 0)
+			reject(&evidence.hard.targetAttributes, QStringLiteral("affiliation"));
+		if ((rule.corp_judge == 1 && attrs.corp_attr != 1)
+			|| (rule.corp_judge == 2 && attrs.corp_attr == 1))
+			reject(&evidence.hard.targetAttributes, QStringLiteral("corp"));
+	}
+
+	// 识别结果与 B 区事件的运动/空间硬条件分属不同证据路径：
+	// 1. 无识别结果时仍按现有威胁评分回退口径形成 LOW/MEDIUM 事件；
+	// 2. MinIO 图片另由 opticSeen 独立触发 HIGH；
+	// 3. 否则“optic 或 B 区连续 7 秒”会错误退化成必须 optic。
+	evidence.hard.detection = detection.found;
+	if (detection.found) {
+		const QString resolvedType = !detection.finalTargetType.isEmpty()
+			? detection.finalTargetType : detection.camTargetType;
+		if (rule.targetattr_type > 0) {
+			const int typeBit = convertTargetTypeStringToBitmask(resolvedType);
+			if (typeBit == 0 || (rule.targetattr_type & typeBit) == 0)
+				reject(&evidence.hard.targetType, QStringLiteral("target_type"));
+		}
+		if (rule.camera_detect_type > 0) {
+			const int bit = convertTargetTypeStringToBitmask(detection.camTargetType);
+			if (bit == 0 || (rule.camera_detect_type & bit) == 0)
+				reject(&evidence.hard.targetType, QStringLiteral("camera_type"));
+		}
+		if (rule.llm_detect_type > 0) {
+			const int bit = convertTargetTypeStringToBitmask(detection.llmTargetType);
+			if (bit == 0 || (rule.llm_detect_type & bit) == 0)
+				reject(&evidence.hard.targetType, QStringLiteral("llm_type"));
+		}
+		if (rule.uav_detect_type > 0) {
+			const int bit = convertTargetTypeStringToBitmask(detection.uavTargetType);
+			if (bit == 0 || (rule.uav_detect_type & bit) == 0)
+				reject(&evidence.hard.targetType, QStringLiteral("uav_type"));
+		}
+	}
+
+	ThreatAssessmentParams threatParams(rule.group_id, rule.area_id);
+	for (const ThreatAssessmentParams& params : gConfig->m_listThreatAssessmentParams) {
+		if (params.groupId == rule.group_id && params.areaId == rule.area_id) {
+			threatParams = params;
+			break;
+		}
+	}
+	const ThreatAssessmentResult assessment = calculateThreatAssessment(
+		track, detection, threatParams, hasProtectArea, protectCenter, angleToCheck);
+	evidence.score = qBound(0, static_cast<int>(qRound(assessment.totalThreatLevel)), 100);
+	evidence.hard.failure = failures.join(QLatin1Char('|'));
+	return evidence;
+}
+
+void TrackAlarmThread::processAreaEscalation()
+{
+	QHash<QString, AreaEscalationEvaluator::TargetSnapshot> snapshotsByTarget;
+	QSet<AreaEscalationEvaluator::TargetKey> liveTargets;
+	QSet<QString> liveSpeedKeys;
+	QHash<QString, DataAccessLayer::DetectionTypeResult> detectionCache;
+	QHash<QString, bool> opticCache;
+	QHash<QString, bool> noAlarmCache;
+
+	auto businessTargetId = [](qint64 mapKey, const SPxPacketTrackExtended& track) {
+		if (mapKey > 0) return mapKey;
+		if (track.secondary.uniqueID > 0)
+			return static_cast<qint64>(track.secondary.uniqueID);
+		return static_cast<qint64>(track.norm.min.id);
+	};
+
+	auto appendBindingSnapshots = [&](const AreaEscalationBinding& binding, const auto& trackMap) {
+		for (auto it = trackMap.constBegin(); it != trackMap.constEnd(); ++it) {
+			const SPxPacketTrackExtended& track = it.value();
+			const qint64 targetId = businessTargetId(static_cast<qint64>(it.key()), track);
+			if (targetId <= 0) continue;
+			const auto domain = binding.domain;
+			liveTargets.insert({domain, targetId});
+			const QString targetKey = QStringLiteral("%1|%2")
+				.arg(static_cast<int>(domain)).arg(targetId);
+			const QString speedKey = QStringLiteral("%1|%2")
+				.arg(binding.rule.condition_id).arg(targetId);
+			liveSpeedKeys.insert(speedKey);
+
+			if (gConfig->isUniqueIdAlarmFiltered(targetId)) {
+				m_areaEscalationEvaluator.clearTarget(domain, targetId);
+				continue; // 人工结束事件同时清资格
+			}
+			if (domain == AreaEscalationEvaluator::TargetDomain::Air
+				&& gConfig->m_alarmLogic.mode == 0
+				&& track.norm.min.reserved1 != 3) {
+				m_areaEscalationEvaluator.clearTarget(domain, targetId);
+				continue;
+			}
+
+			const QPointF point(track.latDegs, track.longDegs);
+			const bool insideArea = containsCurrentPoint(binding.runtimeArea, point);
+			const bool previousSpeedPassed =
+				m_areaEscalationPreviousSpeed.value(speedKey, false);
+
+			AreaEscalationEvaluator::TargetSnapshot& snapshot = snapshotsByTarget[targetKey];
+			snapshot.targetId = targetId;
+			snapshot.domain = domain;
+			snapshot.laneId = binding.laneId;
+			snapshot.position = point;
+			snapshot.courseDeg = track.norm.min.courseDegrees;
+			snapshot.speedMps = track.norm.min.speedMps;
+			if (!noAlarmCache.contains(targetKey)) {
+				bool insideNoAlarm = false;
+				for (int groupId : gConfig->m_alarmLogic.noAlarmGroupIds) {
+					if (groupId >= 0 && isTrackInGroupAreaByGroupId(point, groupId)) {
+						insideNoAlarm = true;
+						break;
+					}
+				}
+				const bool hasPublished = insideNoAlarm && trackHasPublishedAlarm(
+					gConfig, targetId, gConfig->m_alarmLogic.trackAlreadyHasAlarmWindowMs);
+				noAlarmCache.insert(targetKey, insideNoAlarm && !hasPublished);
+			}
+			snapshot.suppressNewEvent = noAlarmCache.value(targetKey, false);
+
+			const qint64 detectionId = track.secondary.uniqueID > 0
+				? static_cast<qint64>(track.secondary.uniqueID) : targetId;
+			if (insideArea && !detectionCache.contains(targetKey))
+				detectionCache.insert(targetKey, gConfig->dbHelper.getDetectionTypesByReId(detectionId));
+			const DataAccessLayer::DetectionTypeResult detection = detectionCache.value(targetKey);
+
+			AreaEscalationEvaluator::AreaObservation observation;
+			observation.area = binding.area.key;
+			observation.role = binding.role;
+			observation.laneId = binding.laneId;
+			observation.trackType = binding.trackType;
+			observation.threatThreshold = binding.rule.threat_level1;
+			observation.prewarningThreshold = binding.rule.threat_level2;
+			observation.evidence = evaluateAreaEscalationEvidence(
+				binding.rule, track, detection, previousSpeedPassed, insideArea);
+			if (insideArea && binding.role == AreaEscalationEvaluator::AreaRole::Alarm) {
+				if (!opticCache.contains(targetKey)) {
+					opticCache.insert(targetKey,
+						gConfig->dbHelper.hasMinioMultiMetadataForUniqueId(
+							detectionId, QStringLiteral("%")));
+				}
+				observation.evidence.opticSeen = opticCache.value(targetKey, false);
+				if (observation.evidence.score < observation.threatThreshold
+					|| !observation.evidence.hard.allPassed()) {
+					logAlarmTraceThrottled(
+						QStringLiteral("area_escalation_block_%1_%2")
+							.arg(speedKey, binding.area.key.toString()),
+						QStringLiteral(
+							"AreaEscalation blocked in B------domain:%1 lane:%2 target:%3 area:%4 "
+							"score:%5 thresholds:%6/%7 speed:%8 course:%9 hard:[%10]")
+							.arg(escalationDomainName(domain), binding.laneId)
+							.arg(targetId).arg(binding.area.key.toString())
+							.arg(observation.evidence.score)
+							.arg(observation.threatThreshold)
+							.arg(observation.prewarningThreshold)
+							.arg(track.norm.min.speedMps, 0, 'f', 2)
+							.arg(track.norm.min.courseDegrees, 0, 'f', 2)
+							.arg(observation.evidence.hard.summary()),
+						5000);
+				}
+			}
+			snapshot.observations.append(observation);
+
+			if (insideArea) {
+				bool currentSpeedPassed = true;
+				if (binding.rule.speed_condition == 1)
+					currentSpeedPassed = track.norm.min.speedMps < binding.rule.speed;
+				else if (binding.rule.speed_condition == 2)
+					currentSpeedPassed = track.norm.min.speedMps > binding.rule.speed;
+				m_areaEscalationPreviousSpeed.insert(speedKey, currentSpeedPassed);
+			}
+		}
+	};
+
+	for (const AreaEscalationBinding& binding : m_areaEscalationBindings) {
+		if (binding.domain == AreaEscalationEvaluator::TargetDomain::Air)
+			appendBindingSnapshots(binding, m_mapBirdRadarTrack);
+		else
+			appendBindingSnapshots(binding, m_mapFuseTrack);
+	}
+
+	// 生命周期以各实时航迹表为准；非融合表只证明航迹仍存在，不参与 A/B 区域判定。
+	auto addSpxLiveness = [&](const auto& trackMap,
+		AreaEscalationEvaluator::TargetDomain domain, bool keepMapKey) {
+		for (auto it = trackMap.constBegin(); it != trackMap.constEnd(); ++it) {
+			const SPxPacketTrackExtended& track = it.value();
+			if (keepMapKey && static_cast<qint64>(it.key()) > 0)
+				liveTargets.insert({domain, static_cast<qint64>(it.key())});
+			if (track.secondary.uniqueID > 0)
+				liveTargets.insert({domain, static_cast<qint64>(track.secondary.uniqueID)});
+			if (track.norm.min.id > 0)
+				liveTargets.insert({domain, static_cast<qint64>(track.norm.min.id)});
+		}
+	};
+	addSpxLiveness(m_mapFuseTrack, AreaEscalationEvaluator::TargetDomain::Surface, true);
+	addSpxLiveness(m_mapBirdRadarTrack, AreaEscalationEvaluator::TargetDomain::Air, true);
+	// 原始雷达可能是海/空融合的上游，只作双域存活证据，避免融合点短暂缺失误删资格。
+	addSpxLiveness(m_mapRadarTrack, AreaEscalationEvaluator::TargetDomain::Surface, false);
+	addSpxLiveness(m_mapRadarTrack, AreaEscalationEvaluator::TargetDomain::Air, false);
+	for (auto it = m_mapAISTrack.constBegin(); it != m_mapAISTrack.constEnd(); ++it) {
+		if (it.key() > 0)
+			liveTargets.insert({AreaEscalationEvaluator::TargetDomain::Surface,
+				static_cast<qint64>(it.key())});
+		if (it.value().MMSI > 0)
+			liveTargets.insert({AreaEscalationEvaluator::TargetDomain::Surface,
+				static_cast<qint64>(it.value().MMSI)});
+	}
+
+	for (auto it = m_areaEscalationPreviousSpeed.begin();
+		 it != m_areaEscalationPreviousSpeed.end();) {
+		if (!liveSpeedKeys.contains(it.key())) it = m_areaEscalationPreviousSpeed.erase(it);
+		else ++it;
+	}
+
+	const QList<AreaEscalationEvaluator::TargetSnapshot> snapshots = snapshotsByTarget.values();
+	const QList<AreaEscalationEvaluator::Result> results =
+		m_areaEscalationEvaluator.evaluateCycle(
+			snapshots, liveTargets, QDateTime::currentMSecsSinceEpoch());
+	for (const AreaEscalationEvaluator::Result& result : results)
+		applyAreaEscalationResult(result);
+}
+
+void TrackAlarmThread::applyAreaEscalationResult(
+	const AreaEscalationEvaluator::Result& result)
+{
+	if (result.conditionId.isEmpty())
+		return;
+	const bool isAir = result.domain == AreaEscalationEvaluator::TargetDomain::Air;
+	const auto& trackMap = isAir ? m_mapBirdRadarTrack : m_mapFuseTrack;
+	if (!trackMap.contains(result.targetId)) {
+		logAlarmTraceThrottled(
+			QStringLiteral("area_escalation_missing_track_%1_%2")
+				.arg(static_cast<int>(result.domain)).arg(result.targetId),
+			QStringLiteral("AreaEscalation result skipped------domain:%1 target:%2 reason:track_map_missing")
+				.arg(escalationDomainName(result.domain)).arg(result.targetId),
+			5000);
+		return;
+	}
+	const SPxPacketTrackExtended& track = trackMap.value(result.targetId);
+	AlarmRule rule = gConfig->m_mapAlarmRule.value(result.conditionId);
+	if (rule.condition_id.isEmpty()) {
+		for (const AreaEscalationBinding& binding : m_areaEscalationBindings) {
+			if (binding.domain == result.domain && binding.area.key == result.eventArea) {
+				rule = binding.rule;
+				break;
+			}
+		}
+	}
+	if (rule.condition_id.isEmpty())
+		return;
+	QString content;
+
+	if (result.stageChanged) {
+		const DataAccessLayer::DetectionTypeResult detection =
+			gConfig->dbHelper.getDetectionTypesByReId(result.targetId);
+		// 双样本速度锁存的第二个样本只确认速度；正文与评分应按升级模块
+		// 返回的触发证据位置/航向构造，不能用第二样本覆盖入区证据。
+		SPxPacketTrackExtended evidenceTrack = track;
+		evidenceTrack.latDegs = result.currentPosition.x();
+		evidenceTrack.longDegs = result.currentPosition.y();
+		evidenceTrack.norm.min.courseDegrees = result.courseDeg;
+		evidenceTrack.norm.min.speedMps = result.speedMps;
+		bool hasProtectArea = false;
+		QPointF protectCenter;
+		AlarmArea protectArea;
+		const QString areaKey = QStringLiteral("%1_%2").arg(rule.group_id).arg(rule.area_id);
+		if (gConfig->m_mapSchemeProtectAreas.contains(areaKey)) {
+			const QPair<int, int> protectKey =
+				gConfig->m_mapSchemeProtectAreas.value(areaKey);
+			if (findAlarmArea(protectKey.first, protectKey.second, &protectArea)
+				&& protectArea.m_alertAreaType == 2) {
+				hasProtectArea = true;
+				protectCenter = protectArea.m_startP;
+			}
+		}
+
+		double attackAngle = evidenceTrack.norm.min.courseDegrees;
+		if (hasProtectArea) {
+			const double bearingToCenter = calculateBearing(
+				evidenceTrack.latDegs, evidenceTrack.longDegs,
+				protectCenter.x(), protectCenter.y());
+			attackAngle = std::abs(evidenceTrack.norm.min.courseDegrees - bearingToCenter);
+			if (attackAngle > 180.0)
+				attackAngle = 360.0 - attackAngle;
+		}
+
+		ThreatAssessmentParams threatParams(rule.group_id, rule.area_id);
+		for (const ThreatAssessmentParams& params : gConfig->m_listThreatAssessmentParams) {
+			if (params.groupId == rule.group_id && params.areaId == rule.area_id) {
+				threatParams = params;
+				break;
+			}
+		}
+		const ThreatAssessmentResult assessment = calculateThreatAssessment(
+			evidenceTrack, detection, threatParams, hasProtectArea, protectCenter, attackAngle);
+		AlarmContentBuildInput readableInput;
+		readableInput.rule = &rule;
+		readableInput.cfg = gConfig;
+		readableInput.uniqueId = result.targetId;
+		readableInput.speedMps = evidenceTrack.norm.min.speedMps;
+		readableInput.courseDeg = evidenceTrack.norm.min.courseDegrees;
+		readableInput.attackAngleDeg = attackAngle;
+		readableInput.heightM = evidenceTrack.altitudeMetres;
+		readableInput.threatScore = result.score;
+		readableInput.hasProtectArea = hasProtectArea;
+		readableInput.isAirTrack = isAir;
+		readableInput.hasThreatBreakdown = true;
+		readableInput.threatBreakdown = assessment;
+		readableInput.triggerPath = result.reason == QLatin1String("direct_entry")
+			? QStringLiteral("threat_direct") : QStringLiteral("rule_match");
+		readableInput.detection = detection;
+		readableInput.hasDetection = detection.found;
+		const QString readableRuleContent = buildRuleAlarmContent(readableInput);
+		content = buildAreaEscalationContent(result, readableRuleContent);
+
+		SaveToDB(rule, result.targetId, track.latDegs, track.longDegs,
+			track.norm.min.speedMps, track.norm.min.courseDegrees,
+			track.norm.min.rangeMetres, isAir ? track.norm.min.reserved1 : 0, result.score,
+			static_cast<int>(track.msgTimeSecs), isAir ? 9 : 0, content,
+			static_cast<int>(result.stage));
+	}
+
+	const QString nowText = QDateTime::currentDateTime().toString(
+		QStringLiteral("yyyy-MM-dd hh:mm:ss.zzz"));
+	{
+		QMutexLocker locker(&gConfig->m_alarmDataMutex);
+		for (auto it = gConfig->m_mapAlarmData.begin(); it != gConfig->m_mapAlarmData.end(); ++it) {
+			AlarmData& alarm = it.value();
+			if (alarm.condition_id != result.conditionId
+				|| static_cast<qint64>(alarm.unique_id) != result.targetId
+				|| alarm.alarm_status == 2) {
+				continue;
+			}
+			alarm.event_stage = static_cast<int>(result.stage);
+			alarm.track_duration = result.alarmDwellMs / 1000.0;
+			alarm.alarm_environment = static_cast<int>(isAir
+				? AlarmTargetEnvironment::Air : AlarmTargetEnvironment::Surface);
+			alarm.task_status = result.disposition == AreaEscalationEvaluator::Disposition::VerifySuccess ? 3 : 0;
+			alarm.threatScore = result.score;
+			alarm.group_id = result.eventArea.groupId;
+			alarm.area_id = result.eventArea.areaId;
+			alarm.targetlat = track.latDegs;
+			alarm.targetlon = track.longDegs;
+			alarm.targetspeed = track.norm.min.speedMps;
+			alarm.targetdir = track.norm.min.courseDegrees;
+			alarm.time = nowText; // 仅刷新内存快照；空白区域不产生 DB UPDATE
+			if (result.stageChanged) {
+				alarm.escalation_reason = result.reason;
+				alarm.escalation_evidence = content;
+				alarm.alarm_content = content;
+			}
+		}
+	}
+
+	if (result.stageChanged) {
+		const QString log = QStringLiteral(
+			"AreaEscalation upgrade------domain:%1 lane:%2 target:%3 qualificationArea:%4/%5 eventArea:%6/%7 stage:%8 reason:%9 "
+			"qualificationTime:%10 alarmEntryTime:%11 dwellMs:%12 previous:(%13,%14) current:(%15,%16) "
+			"course:%17 speed:%18 score:%19 thresholds:%20/%21 hard:[%22] warningToAlarmMs:%23 geometry:[%24]")
+			.arg(escalationDomainName(result.domain), result.laneId)
+			.arg(result.targetId)
+			.arg(result.qualificationArea.groupId).arg(result.qualificationArea.areaId)
+			.arg(result.eventArea.groupId).arg(result.eventArea.areaId)
+			.arg(AreaEscalationEvaluator::stageName(result.stage), result.reason)
+			.arg(result.qualificationTimeMs).arg(result.alarmEntryTimeMs).arg(result.alarmDwellMs)
+			.arg(result.previousPosition.x(), 0, 'f', 8).arg(result.previousPosition.y(), 0, 'f', 8)
+			.arg(result.currentPosition.x(), 0, 'f', 8).arg(result.currentPosition.y(), 0, 'f', 8)
+			.arg(result.courseDeg, 0, 'f', 2).arg(result.speedMps, 0, 'f', 2)
+			.arg(result.score).arg(result.threatThreshold).arg(result.prewarningThreshold)
+			.arg(result.hardConditions).arg(result.warningToAlarmMs).arg(result.entryGeometry);
+		qInfo().noquote() << log;
+		AlarmFileLogger::logNewAlarmTrack(log);
+	}
+}
 bool TrackAlarmThread::isTrackInOtherAlarmArea(QPolygonF polyNow,QPointF pt, QList< AlarmRule> waringList,int index)
 {
 	
@@ -1497,6 +2179,9 @@ bool TrackAlarmThread::isTrackInOtherAlarmArea(QPolygonF polyNow,QPointF pt, QLi
 }
 void TrackAlarmThread::processAlarms()
 {
+	// 一轮处理只能观察一个完整方案快照。热更新会等待本轮结束，再原子替换
+	// 规则并清旧事件；下一轮必定按新 generation reset A/B 状态。
+	QReadLocker alarmConfigLocker(&gConfig->m_alarmConfigLock);
 	// 根据告警类型处理不同的业务
 	//qDebug() << "0==========================" << endl;
 	getAlarmArea();
@@ -1567,11 +2252,18 @@ void TrackAlarmThread::processAlarms()
 	}
 	int trailCount = 2;
 	QList< AlarmRule> waringList = gConfig->m_mapAlarmRule.values();
+	const bool areaEscalationActive = configureAreaEscalation(waringList);
+	if (areaEscalationActive)
+		processAreaEscalation();
 	//qDebug() << "TrackAlarmThread: processAlarms: waringList size" << waringList.size();
 	for (int i = 0; i < waringList.size(); i++)
 	{
 		//qDebug() << "TrackAlarmThread: processAlarms: waringList" << i;
 		AlarmRule info = waringList.at(i);
+		if (areaEscalationActive
+			&& m_areaEscalationClaimedConditionIds.contains(info.condition_id)) {
+			continue; // 新三态已统一研判，本轮不得再输出旧停留/黄色逻辑
+		}
 		//qDebug() << "TrackAlarmThread: processAlarms: info" << info.track_type;
 		if (info.alarmstate)
 		{

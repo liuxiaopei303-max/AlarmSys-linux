@@ -22,7 +22,13 @@ namespace NewTrackStructGrpcConvert {
 namespace {
 
 using trackmanager::grpc::new_track_struct::FusionSourceItem;
+using trackmanager::grpc::new_track_struct::EnvironmentType_AIR;
+using trackmanager::grpc::new_track_struct::EnvironmentType_MARITIME;
+using trackmanager::grpc::new_track_struct::EnvironmentType_SUBSURFACE;
+using trackmanager::grpc::new_track_struct::EnvironmentType_SURFACE;
+using trackmanager::grpc::new_track_struct::EnvironmentType_UNKNOWN;
 using trackmanager::grpc::new_track_struct::RadarObservedTargetProfile;
+using trackmanager::grpc::new_track_struct::RealityType_VIRTUAL;
 using trackmanager::grpc::new_track_struct::TargetObject;
 using trackmanager::grpc::new_track_struct::TargetSourceItem;
 using trackmanager::grpc::new_track_struct::ThreatLevel_HIGH;
@@ -134,6 +140,38 @@ uint32_t threatScoreFromPriority(const TargetObject& t)
 }
 
 } // namespace
+
+TargetRouteDecision routeTarget(
+    const TargetObject& target,
+    const QStringList& allowedVirtualSourceIds)
+{
+    TargetRouteDecision decision;
+    decision.sourceId = QString::fromStdString(target.target_board().entity_id()).trimmed();
+
+    if (target.reality_type() == RealityType_VIRTUAL
+        && !allowedVirtualSourceIds.contains(decision.sourceId)) {
+        decision.reason = QStringLiteral("virtual_source_not_allowed");
+        return decision;
+    }
+
+    if (target.environment() == EnvironmentType_SURFACE
+        || target.environment() == EnvironmentType_MARITIME
+        || target.environment() == EnvironmentType_SUBSURFACE) {
+        decision.domain = TargetRouteDomain::Surface;
+        return decision;
+    }
+    if (target.environment() == EnvironmentType_AIR) {
+        decision.domain = TargetRouteDomain::Air;
+        return decision;
+    }
+    if (target.environment() == EnvironmentType_UNKNOWN) {
+        decision.reason = QStringLiteral("unknown_environment");
+        return decision;
+    }
+
+    decision.reason = QStringLiteral("unsupported_environment");
+    return decision;
+}
 
 bool parseTargetId(const TargetObject& t, qint64* outTargetId)
 {

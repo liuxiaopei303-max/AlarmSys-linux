@@ -28,7 +28,6 @@
 
 namespace {
 
-using trackmanager::grpc::new_track_struct::EnvironmentType_AIR;
 using trackmanager::grpc::new_track_struct::NewTrackStructStreamService;
 using trackmanager::grpc::new_track_struct::SubscribeNewTrackStructRequest;
 using trackmanager::grpc::new_track_struct::TargetObject;
@@ -107,27 +106,51 @@ void applyTargetOutputSet(NewTrackStructGrpcClient* client, const TargetOutputSe
     int seaN = 0;
     int airN = 0;
     int skippedDead = 0;
+    int skippedRoute = 0;
+    QString firstRouteReject;
     for (int i = 0; i < sample.targets_size(); ++i) {
         const TargetObject& t = sample.targets(i);
         qint64 targetId = 0;
         if (!NewTrackStructGrpcConvert::parseTargetId(t, &targetId) || targetId <= 0) {
             continue;
         }
-        const bool isBird = (t.environment() == EnvironmentType_AIR);
-
-        // LOST/MERGED：显式删除。不做「本帧全量快照踢 ID」——上游常是增量分片，否则会误删仍存活目标导致不告警。
+        // LOST/MERGED：从海空两侧同时删除。终态目标可能来自 UNKNOWN 或上游域变更，
+        // 不能依赖本帧 environment 决定只清一张表。
         if (t.state() == trackmanager::grpc::new_track_struct::TargetState_LOST
             || t.state() == trackmanager::grpc::new_track_struct::TargetState_MERGED) {
-            if (isBird) {
-                cfg->m_mapBirdFuseTrack.remove(targetId);
-                cfg->m_mapBirdFuseTrail.remove(targetId);
-            } else {
-                cfg->m_mapFuseTrack.remove(targetId);
-                cfg->m_mapFuseTrail.remove(targetId);
-            }
+            cfg->m_mapBirdFuseTrack.remove(targetId);
+            cfg->m_mapBirdFuseTrail.remove(targetId);
+            cfg->m_mapFuseTrack.remove(targetId);
+            cfg->m_mapFuseTrail.remove(targetId);
             ++skippedDead;
             continue;
         }
+
+        const NewTrackStructGrpcConvert::TargetRouteDecision route =
+            NewTrackStructGrpcConvert::routeTarget(
+                t, cfg->m_struBasicConfig.m_virtualTrackSourceAllowList);
+        if (!route.accepted()) {
+            // 旧版本会把所有非 AIR（包括 UNKNOWN）写进对海表；部署后立即清掉同 ID
+            // 的残留，避免继续产生无法在统一出口回填的幽灵告警。
+            cfg->m_mapBirdFuseTrack.remove(targetId);
+            cfg->m_mapBirdFuseTrail.remove(targetId);
+            cfg->m_mapFuseTrack.remove(targetId);
+            cfg->m_mapFuseTrail.remove(targetId);
+            ++skippedRoute;
+            if (firstRouteReject.isEmpty()) {
+                firstRouteReject = QStringLiteral(
+                    "target=%1 source=%2 reality=%3 environment=%4 type=%5 reason=%6")
+                    .arg(targetId)
+                    .arg(route.sourceId)
+                    .arg(static_cast<int>(t.reality_type()))
+                    .arg(static_cast<int>(t.environment()))
+                    .arg(static_cast<int>(t.classified_type()))
+                    .arg(route.reason);
+            }
+            continue;
+        }
+        const bool isBird = route.domain
+            == NewTrackStructGrpcConvert::TargetRouteDomain::Air;
 
         SPxPacketTrackExtended track;
         if (!NewTrackStructGrpcConvert::targetToSpxExtended(t, track, isBird)) {
@@ -173,11 +196,16 @@ void applyTargetOutputSet(NewTrackStructGrpcClient* client, const TargetOutputSe
 
     static qint64 s_lastLogMs = 0;
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    if ((seaN || airN || skippedDead) && nowMs - s_lastLogMs >= 5000) {
+    if ((seaN || airN || skippedDead || skippedRoute) && nowMs - s_lastLogMs >= 5000) {
         qInfo() << "[NewTrackStructGrpc] ingest sea=" << seaN << "air=" << airN
                 << "skippedDead=" << skippedDead
+                << "skippedRoute=" << skippedRoute
                 << "fuseMap=" << cfg->m_mapFuseTrack.size()
                 << "birdMap=" << cfg->m_mapBirdFuseTrack.size();
+        if (!firstRouteReject.isEmpty()) {
+            qWarning().noquote() << QStringLiteral("[NewTrackStructGrpc] rejected %1")
+                .arg(firstRouteReject);
+        }
         s_lastLogMs = nowMs;
     }
 }

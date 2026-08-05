@@ -39,11 +39,13 @@ set(ALARM_SOURCES
     "${ALARM_SRC_DIR}/customconfig.cpp"
     "${ALARM_SRC_DIR}/common/commonfunc.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/TrackAlarmThread.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationEvaluator.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/SuspiciousTargetThread.cpp"
     "${ALARM_SRC_DIR}/dialog/analysis/TargetTypeFusionThread.cpp"
     "${ALARM_SRC_DIR}/dialog/analysis/TargetTypeFusionLogic.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AlarmFileLogger.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AlarmContentBuilder.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationAlarmContent.cpp"
     "${ALARM_SRC_DIR}/db/DataAccessLayer.cpp"
     "${ALARM_SRC_DIR}/db/DatabaseManager.cpp"
     "${ALARM_SRC_DIR}/db/dbconnectionpool.cpp"
@@ -153,6 +155,68 @@ target_link_libraries(alarmsys PRIVATE
     ${PROTOBUF_LIB}
     pthread
 )
+
+enable_testing()
+add_executable(area_escalation_evaluator_test
+    "${CMAKE_SOURCE_DIR}/tests/AreaEscalationEvaluatorTest.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationEvaluator.cpp"
+)
+target_include_directories(area_escalation_evaluator_test PRIVATE "${ALARM_SRC_DIR}")
+target_link_libraries(area_escalation_evaluator_test PRIVATE Qt5::Core Qt5::Gui)
+set_target_properties(area_escalation_evaluator_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    AUTOMOC OFF
+)
+add_test(NAME area_escalation_evaluator_test COMMAND area_escalation_evaluator_test)
+
+add_executable(alarm_grpc_snapshot_mapping_test
+    "${CMAKE_SOURCE_DIR}/tests/AlarmGrpcSnapshotMappingTest.cpp"
+)
+target_include_directories(alarm_grpc_snapshot_mapping_test PRIVATE "${ALARM_SRC_DIR}")
+target_link_libraries(alarm_grpc_snapshot_mapping_test PRIVATE Qt5::Core)
+set_target_properties(alarm_grpc_snapshot_mapping_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    AUTOMOC OFF
+)
+add_test(NAME alarm_grpc_snapshot_mapping_test COMMAND alarm_grpc_snapshot_mapping_test)
+
+add_executable(new_track_struct_routing_test
+    "${CMAKE_SOURCE_DIR}/tests/NewTrackStructRoutingTest.cpp"
+    "${ALARM_SRC_DIR}/grpc_track/new_track_struct_grpc_convert.cpp"
+    "${GRPC_NEW_TRACK_STRUCT_GEN_DIR}/target_stream.pb.cc"
+)
+target_include_directories(new_track_struct_routing_test PRIVATE
+    "${ALARM_SRC_DIR}"
+    "${SPX_INCLUDES}"
+    "${GRPC_NEW_TRACK_STRUCT_GEN_DIR}"
+    "${GRPC_ROOT}/include"
+)
+target_link_libraries(new_track_struct_routing_test PRIVATE
+    Qt5::Core
+    ${PROTOBUF_LIB}
+    ${ABSL_SYNC_LIB}
+    ${ABSL_STRINGS_LIB}
+    pthread
+)
+set_target_properties(new_track_struct_routing_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    AUTOMOC OFF
+)
+add_test(NAME new_track_struct_routing_test COMMAND new_track_struct_routing_test)
+
+add_executable(alarm_content_builder_test
+    "${CMAKE_SOURCE_DIR}/tests/AlarmContentBuilderTest.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationEvaluator.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationAlarmContent.cpp"
+)
+target_include_directories(alarm_content_builder_test PRIVATE "${ALARM_SRC_DIR}")
+target_link_libraries(alarm_content_builder_test PRIVATE
+    Qt5::Core Qt5::Gui Qt5::Sql Qt5::Concurrent Qt5::Network Qt5::Widgets)
+set_target_properties(alarm_content_builder_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    AUTOMOC OFF
+)
+add_test(NAME alarm_content_builder_test COMMAND alarm_content_builder_test)
 
 if(UNIX AND NOT APPLE)
     # 必须与 find_package(Qt5) 实际链接的 lib 目录一致；硬编码 /usr 会在 conda/Qt5.15 链接下

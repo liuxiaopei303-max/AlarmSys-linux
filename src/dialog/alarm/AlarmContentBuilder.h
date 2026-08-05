@@ -2,6 +2,7 @@
 
 #include "datastruct/commonStruct.h"
 #include "db/DataAccessLayer.h"
+#include "dialog/alarm/AreaEscalationEvaluator.h"
 
 class CustomConfig;
 
@@ -32,3 +33,11 @@ QString buildRuleAlarmContent(const AlarmContentBuildInput& input);
 /** 用户手动确认告警原因（JSON，含 summary） */
 QString buildManualAlarmContent(
     CustomConfig* cfg, qint64 uniqueId, bool isAirTrack, double speedMps, double courseDeg);
+
+/**
+ * 三态升级证据链（仅内存/gRPC；不要求数据库新增字段）。
+ * readableRuleContent 有效时保留原规则告警的中文 summary 和评分字段，再追加升级证据。
+ */
+QString buildAreaEscalationContent(
+    const AreaEscalationEvaluator::Result& result,
+    const QString& readableRuleContent = QString());

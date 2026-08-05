@@ -266,6 +266,16 @@ public:
     BasicConfig m_struBasicConfig;   //配置-基础配置
     AlarmLogicConfig m_alarmLogic;   //配置-航迹告警逻辑（Config.ini [AlarmLogic]）
     SuspiciousTargetConfig m_suspiciousTarget; /**< 可疑目标研判（Config.ini [SuspiciousTarget]） */
+    AreaEscalationConfig m_areaEscalation; /**< 三态区域升级（Config.ini [AreaEscalation]） */
+    /**
+     * alarm_setting/区域配置的运行时快照锁。
+     *
+     * TrackAlarmThread 持读锁完成整轮研判，热更新持写锁替换规则并清空旧事件，
+     * 保证方案往返切换时不会在新规则已加载、旧 A/B 状态尚未 reset 的窗口
+     * 继续发布上一方案事件。
+     */
+    QReadWriteLock m_alarmConfigLock;
+    quint64 m_alarmConfigGeneration = 1; /**< alarm_rules 热更新代次，供状态机原子 reset */
     OtherConfig m_struOtherConfig;//配置-其他配置
     UrlConfig m_struUrlConfig{};
     int m_nRatio; //0-1080；1-2160

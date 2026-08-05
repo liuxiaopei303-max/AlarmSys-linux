@@ -126,6 +126,11 @@ struct AlarmLogicConfig {
     int defaultThreatScore = 90;            /**< 黑名单直告警或未计算威胁度时的默认 threatScore */
 };
 
+/** 三态区域升级运行开关（Config.ini [AreaEscalation]）。 */
+struct AreaEscalationConfig {
+    int enabled = 0; /**< 1=启用显式 A(alarm_level=2) / B(alarm_level=3) 三态逻辑 */
+};
+
 /** 可疑目标研判（Config.ini [SuspiciousTarget]）；默认经告警快照嵌入 TargetObject.alarms */
 struct SuspiciousTargetConfig {
     int enabled = 0;                       /**< 0=关闭 SuspiciousTargetThread，1=启用 */
@@ -171,6 +176,13 @@ struct BasicConfig
      */
     QString m_strFusionTrackTransport = QStringLiteral("dds");
     QString m_strNewTrackStructGrpcAddr = QStringLiteral("192.168.18.141:60055");
+    /**
+     * gRPC 统一出口内允许进入 AlarmSys 的虚兵来源。
+     * 默认只接正常 NewTrackStruct 虚兵链路，拒绝旧 DDS→SPx 桥接来源。
+     */
+    QStringList m_virtualTrackSourceAllowList = {
+        QStringLiteral("virtual_new_track_struct_grpc_client")
+    };
     /**
      * 远遥等原始航迹：dds | grpc
      * - dds：TrackClassSubscriber（需 TrackEnableOldSubscriber=1）
@@ -2046,6 +2058,16 @@ struct AlarmData {
     QString alarm_content;
     /** system_evaluation_data.threat_time（毫秒）：新威胁落库时写入，与 TrackAlarmThread 日志 timeOrigin/timeNow 语义一致 */
     qint64 threat_time_ms = 0;
+    /** 仅内存/gRPC 使用：0=旧事件，1=LOW威胁，2=MEDIUM预警，3=HIGH正式告警。 */
+    int event_stage = 0;
+    /** score/direct_entry/optic/alarm_area_dwell。 */
+    QString escalation_reason;
+    /** A/B、资格、入区、几何和硬条件证据的紧凑 JSON。 */
+    QString escalation_evidence;
+    /** B 区本地墙上时钟连续停留时长；不再使用 origintime。 */
+    double track_duration = 0.0;
+    /** 仅内存/gRPC 使用：-1=旧事件未知，3=AIR，4=SURFACE（与 gRPC 枚举一致）。 */
+    int alarm_environment = -1;
 };
 
 /** 规则告警有效处置状态（与 DDS taskStatus / gRPC disposition 对齐） */

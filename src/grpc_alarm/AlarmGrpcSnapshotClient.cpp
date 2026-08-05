@@ -1,4 +1,5 @@
 #include "AlarmGrpcSnapshotClient.hpp"
+#include "AlarmGrpcSnapshotMapping.h"
 
 #include "customconfig.h"
 #include "dialog/alarm/AlarmContentBuilder.h"
@@ -37,15 +38,18 @@ double parseAlarmTimeSec(const QString& timeStr)
     return static_cast<double>(QDateTime::currentDateTime().toSecsSinceEpoch());
 }
 
-ThreatLevel threatLevelFromScore(int score)
+ThreatLevel threatLevelFromAlarmData(const AlarmData& alarmData, CustomConfig* cfg)
 {
-    if (score >= 70) {
+    Q_UNUSED(cfg);
+    switch (alarmSnapshotLevelFromEventStage(alarmData.event_stage)) {
+    case AlarmSnapshotLevel::High:
         return ThreatLevel::HIGH;
-    }
-    if (score >= 30) {
+    case AlarmSnapshotLevel::Medium:
         return ThreatLevel::MEDIUM;
+    case AlarmSnapshotLevel::Low:
+    default:
+        return ThreatLevel::LOW;
     }
-    return ThreatLevel::LOW;
 }
 
 AlarmLifecycleStatus lifecycleFromStatus(int alarmStatus)
@@ -72,11 +76,6 @@ AlarmDispositionStatus dispositionFromTaskStatus(int taskStatus)
     default:
         return AlarmDispositionStatus::UNASSIGNED;
     }
-}
-
-EnvironmentType environmentFromRuleTrackType(int ruleTrackType)
-{
-    return (ruleTrackType > 0) ? EnvironmentType::AIR : EnvironmentType::SURFACE;
 }
 
 void fillGeoPosition(GeoPosition* pos, double lon, double lat, double alt = 0.0)
@@ -128,7 +127,7 @@ AlarmItem buildAlarmItem(const AlarmData& alarmData, CustomConfig* cfg, const QS
     if (alarmData.condition_id == QStringLiteral("manual_confirm")) {
         item.set_level(ThreatLevel::HIGH);
     } else {
-        item.set_level(threatLevelFromScore(alarmData.threatScore));
+        item.set_level(threatLevelFromAlarmData(alarmData, cfg));
     }
     item.mutable_area()->set_area_id(
         QStringLiteral("%1_%2").arg(alarmData.group_id).arg(alarmData.area_id).toStdString());
@@ -335,7 +334,10 @@ bool AlarmGrpcSnapshotClient::pushSnapshot(CustomConfig* cfg)
             }
 
             SnapshotKey key;
-            key.environment = static_cast<int>(environmentFromRuleTrackType(ruleTrackType));
+            const AlarmTargetEnvironment eventEnvironment =
+                static_cast<AlarmTargetEnvironment>(alarmData.alarm_environment);
+            key.environment = static_cast<int>(
+                resolveAlarmEnvironment(eventEnvironment, ruleTrackType));
             key.targetId = QString::number(grpcTargetId);
 
             TargetAlarmRecord record;

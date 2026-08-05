@@ -1,0 +1,479 @@
+#include "dialog/alarm/AreaEscalationEvaluator.h"
+
+#include <QCoreApplication>
+#include <QDebug>
+#include <cstdlib>
+
+using Evaluator = AreaEscalationEvaluator;
+
+namespace {
+
+int failures = 0;
+
+#define CHECK(name, expr) do { \
+    if (!(expr)) { qCritical().noquote() << "FAIL" << name << "line" << __LINE__; ++failures; } \
+    else { qInfo().noquote() << "PASS" << name; } \
+} while (false)
+
+Evaluator::AreaDefinition rect(int areaId, double x1, double y1, double x2, double y2)
+{
+    Evaluator::AreaDefinition a;
+    a.key = {3, areaId};
+    a.shape = Evaluator::Shape::Rectangle;
+    a.rectangle = QRectF(QPointF(x1, y1), QPointF(x2, y2)).normalized();
+    a.name = QStringLiteral("area_%1").arg(areaId);
+    return a;
+}
+
+Evaluator::PairDefinition pair(
+    const Evaluator::AreaDefinition& a = rect(16, 0, 0, 2, 2),
+    const Evaluator::AreaDefinition& b = rect(15, 8, 0, 10, 2))
+{
+    Evaluator::PairDefinition p;
+    p.enabled = true;
+    p.warningArea = a;
+    p.alarmArea = b;
+    p.threatThreshold = 20;
+    p.prewarningThreshold = 60;
+    p.dwellMs = 7000;
+    p.warningRuleId = QStringLiteral("rule-A");
+    p.alarmRuleId = QStringLiteral("rule-B");
+    return p;
+}
+
+Evaluator::TargetSnapshot target(
+    const QPointF& point, int warningScore, int alarmScore,
+    bool warningAvailable = true, bool alarmAvailable = true)
+{
+    Evaluator::TargetSnapshot s;
+    s.targetId = 1001;
+    s.position = point;
+    s.courseDeg = 12.0;
+    s.speedMps = 4.0;
+    s.warning.available = warningAvailable;
+    s.warning.score = warningScore;
+    s.warning.conditionId = QStringLiteral("rule-A");
+    s.alarm.available = alarmAvailable;
+    s.alarm.score = alarmScore;
+    s.alarm.conditionId = QStringLiteral("rule-B");
+    return s;
+}
+
+Evaluator::Result one(const QList<Evaluator::Result>& results)
+{
+    return results.isEmpty() ? Evaluator::Result() : results.first();
+}
+
+void scoreContractTests()
+{
+    Evaluator e;
+    QString error;
+    CHECK("pair reset", e.reset(pair(), &error));
+    CHECK("1. 19分无事件", e.evaluateCycle({target(QPointF(1, 1), 19, 19)}, 0).isEmpty());
+
+    e.reset(pair());
+    CHECK("2. 20分威胁LOW", one(e.evaluateCycle({target(QPointF(1, 1), 20, 20)}, 0)).stage == Evaluator::Stage::Threat);
+    e.reset(pair());
+    CHECK("3. 59分威胁LOW", one(e.evaluateCycle({target(QPointF(1, 1), 59, 59)}, 0)).stage == Evaluator::Stage::Threat);
+    e.reset(pair());
+    CHECK("4. 60分预警MEDIUM", one(e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0)).stage == Evaluator::Stage::Prewarning);
+}
+
+void spatialRelationshipTests()
+{
+    Evaluator e;
+
+    e.reset(pair(rect(16, 0, 0, 10, 10), rect(15, 4, 4, 6, 6)));
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
+    CHECK("5. A包含B", one(e.evaluateCycle({target(QPointF(5, 5), 60, 60)}, 100)).reason == QStringLiteral("direct_entry"));
+
+    e.reset(pair());
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
+    const auto blank = one(e.evaluateCycle({target(QPointF(5, 1), 60, 60)}, 100));
+    const auto separated = one(e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 200));
+    CHECK("6. A、B分离且中间航迹持续", blank.stage == Evaluator::Stage::Prewarning && separated.reason == QStringLiteral("direct_entry"));
+
+    e.reset(pair());
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
+    e.evaluateCycle({}, 100);
+    CHECK("7. 分离途中航迹丢失", one(e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 200)).stage == Evaluator::Stage::Prewarning);
+
+    e.reset(pair(rect(16, 0, 0, 2, 2), rect(15, 2, 0, 4, 2)));
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
+    CHECK("8. 边界相接", one(e.evaluateCycle({target(QPointF(3, 1), 60, 60)}, 100)).stage == Evaluator::Stage::Alarm);
+
+    e.reset(pair(rect(16, 0, 0, 6, 2), rect(15, 4, 0, 10, 2)));
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
+    const auto overlapDirect = one(e.evaluateCycle({target(QPointF(5, 1), 60, 60)}, 100));
+    e.reset(pair(rect(16, 0, 0, 6, 2), rect(15, 4, 0, 10, 2)));
+    e.evaluateCycle({target(QPointF(8, 1), 60, 60)}, 0);
+    const auto overlapNoRetro = one(e.evaluateCycle({target(QPointF(5, 1), 60, 60)}, 100));
+    CHECK("9. 部分相交", overlapDirect.stage == Evaluator::Stage::Alarm && overlapNoRetro.stage == Evaluator::Stage::Prewarning);
+
+    e.reset(pair(rect(16, 4, 0, 6, 2), rect(15, 0, 0, 10, 2)));
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
+    CHECK("10. B包含A", one(e.evaluateCycle({target(QPointF(5, 1), 60, 60)}, 100)).stage == Evaluator::Stage::Prewarning);
+
+    const auto sameA = rect(16, 0, 0, 4, 4);
+    const auto sameB = rect(15, 0, 0, 4, 4);
+    e.reset(pair(sameA, sameB));
+    e.evaluateCycle({target(QPointF(-1, -1), 60, 60)}, 0);
+    const auto firstEnter = one(e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 100));
+    e.evaluateCycle({target(QPointF(-1, -1), 60, 60)}, 200);
+    const auto secondEnter = one(e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 300));
+    CHECK("11. A、B完全重合", firstEnter.stage == Evaluator::Stage::Prewarning && secondEnter.reason == QStringLiteral("direct_entry"));
+}
+
+void entryOrderingTests()
+{
+    Evaluator e;
+    e.reset(pair());
+    CHECK("12. 首次发现已经在B", one(e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 0)).stage == Evaluator::Stage::Prewarning);
+
+    e.reset(pair(rect(16, 0, 0, 4, 4), rect(15, 0, 0, 4, 4)));
+    e.evaluateCycle({target(QPointF(-1, -1), 60, 60)}, 0);
+    CHECK("13. 同周期同时进入A/B不直告", one(e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 100)).stage == Evaluator::Stage::Prewarning);
+
+    e.reset(pair(rect(16, 4, 0, 6, 2), rect(15, 0, 0, 10, 2)));
+    e.evaluateCycle({target(QPointF(-1, 1), 60, 60)}, 0);
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 100);
+    CHECK("14. 先B后A资格不追溯", one(e.evaluateCycle({target(QPointF(5, 1), 60, 60)}, 200)).stage == Evaluator::Stage::Prewarning);
+
+    e.reset(pair());
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
+    e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 100);
+    e.evaluateCycle({target(QPointF(5, 1), 60, 60)}, 200);
+    CHECK("15. 离开B后重入使用旧资格", one(e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 300)).stage == Evaluator::Stage::Alarm);
+
+    e.reset(pair());
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
+    e.evaluateCycle({target(QPointF(9, 1), 59, 59)}, 100);
+    CHECK("16. 入B 59后升60不追溯", one(e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 200)).stage == Evaluator::Stage::Prewarning);
+
+    e.reset(pair());
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
+    auto bad = target(QPointF(9, 1), 60, 60);
+    bad.alarm.hard.height = false;
+    e.evaluateCycle({bad}, 100);
+    CHECK("17. 入B其他硬条件失败后补齐不追溯", one(e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 200)).stage == Evaluator::Stage::Prewarning);
+
+    e.reset(pair());
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
+    auto firstSpeed = target(QPointF(9, 1), 60, 60);
+    firstSpeed.alarm.hard.speedDoubleCheck = false;
+    e.evaluateCycle({firstSpeed}, 100);
+    auto speedConfirmationOnly = target(QPointF(9.5, 1), 60, 60);
+    // 第二个样本只确认双样本速度；直接进入的其他硬条件证据必须沿用入区样本。
+    speedConfirmationOnly.alarm.hard.entryAngle = false;
+    speedConfirmationOnly.alarm.hard.failure = QStringLiteral("entry_angle");
+    const auto speedConfirmed = one(e.evaluateCycle({speedConfirmationOnly}, 200));
+    CHECK("18. 双样本速度第二样本确认",
+          speedConfirmed.reason == QStringLiteral("direct_entry")
+              && speedConfirmed.hardConditions.contains(QStringLiteral("speed_double=1"))
+              && speedConfirmed.hardConditions.contains(QStringLiteral("entry_angle=1"))
+              && speedConfirmed.previousPosition == QPointF(1, 1)
+              && speedConfirmed.currentPosition == QPointF(9, 1));
+}
+
+void dwellOpticAndLifecycleTests()
+{
+    Evaluator e;
+    e.reset(pair());
+    e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 1000);
+    CHECK("19. B内6.9秒不告警", one(e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 7900)).stage == Evaluator::Stage::Prewarning);
+    CHECK("20. B内满7秒告警", one(e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 8000)).reason == QStringLiteral("alarm_area_dwell"));
+
+    e.reset(pair());
+    e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 1000);
+    e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 7900);
+    e.evaluateCycle({target(QPointF(5, 1), 60, 60)}, 7950);
+    const auto reentered = one(e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 8000));
+    CHECK("21. 6.9秒离开计时清零", reentered.stage == Evaluator::Stage::Prewarning && reentered.alarmDwellMs == 0);
+
+    e.reset(pair());
+    e.evaluateCycle({target(QPointF(9, 1), 20, 20)}, 1000);
+    CHECK("22. 20-59分B满7秒升HIGH", one(e.evaluateCycle({target(QPointF(9, 1), 20, 20)}, 8000)).stage == Evaluator::Stage::Alarm);
+
+    // 识别图片是 optic 升级证据，不是 B 区事件或 7 秒连续停留的前置条件。
+    // 否则“光电看到 或 连续在 B 中 7 秒”会退化成只有光电一条路径。
+    e.reset(pair());
+    auto noDetection = target(QPointF(9, 1), 20, 20);
+    noDetection.alarm.hard.detection = false;
+    const auto noDetectionInitial = one(e.evaluateCycle({noDetection}, 1000));
+    const auto noDetectionDwell = one(e.evaluateCycle({noDetection}, 8000));
+    CHECK("22b. B区无识别图片仍形成LOW事件",
+          noDetectionInitial.stage == Evaluator::Stage::Threat);
+    CHECK("22b. B区无识别图片满7秒仍升HIGH",
+          noDetectionDwell.stage == Evaluator::Stage::Alarm
+              && noDetectionDwell.reason == QStringLiteral("alarm_area_dwell"));
+
+    e.reset(pair());
+    auto opticB = target(QPointF(9, 1), 20, 20);
+    opticB.alarm.opticSeen = true;
+    const auto opticResult = one(e.evaluateCycle({opticB}, 0));
+    CHECK("23. B内MinIO命中", opticResult.stage == Evaluator::Stage::Alarm && opticResult.reason == QStringLiteral("optic"));
+
+    e.reset(pair());
+    auto opticA = target(QPointF(1, 1), 60, 60);
+    opticA.warning.opticSeen = true;
+    CHECK("24. A内MinIO不得正式告警", one(e.evaluateCycle({opticA}, 0)).stage == Evaluator::Stage::Prewarning);
+
+    e.reset(pair());
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
+    CHECK("25. 状态只升不降", one(e.evaluateCycle({target(QPointF(5, 1), 19, 19)}, 100)).stage == Evaluator::Stage::Prewarning);
+
+    e.reset(pair());
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
+    e.evaluateCycle({}, 100);
+    CHECK("26. 航迹失效清资格", one(e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 200)).stage == Evaluator::Stage::Prewarning);
+
+    e.reset(pair());
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
+    QSet<qint64> liveInAnotherRealtimeTable;
+    liveInAnotherRealtimeTable.insert(1001);
+    e.evaluateCycle({}, liveInAnotherRealtimeTable, 100);
+    CHECK("26b. 其他实时航迹表仍存在则保留资格",
+          one(e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 200)).reason
+              == QStringLiteral("direct_entry"));
+
+    e.reset(pair());
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
+    e.reset(pair());
+    CHECK("27. 方案重载清状态", one(e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 100)).stage == Evaluator::Stage::Prewarning);
+}
+
+void configurationAndOutputTests()
+{
+    Evaluator e;
+    QString error;
+    auto invalid = pair();
+    invalid.warningArea = Evaluator::AreaDefinition();
+    CHECK("28. 缺失A安全失败", !e.reset(invalid, &error) && !e.isEnabled() && !error.isEmpty());
+    invalid = pair();
+    invalid.alarmArea = Evaluator::AreaDefinition();
+    CHECK("28. 缺失B安全失败", !e.reset(invalid, &error));
+
+    CHECK("29. LOW/MEDIUM/HIGH契约",
+          Evaluator::stageName(Evaluator::Stage::Threat) == QStringLiteral("LOW")
+          && Evaluator::stageName(Evaluator::Stage::Prewarning) == QStringLiteral("MEDIUM")
+          && Evaluator::stageName(Evaluator::Stage::Alarm) == QStringLiteral("HIGH"));
+
+    e.reset(pair());
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
+    const auto direct = one(e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 100));
+    e.reset(pair());
+    auto optic = target(QPointF(9, 1), 20, 20);
+    optic.alarm.opticSeen = true;
+    const auto verified = one(e.evaluateCycle({optic}, 0));
+    CHECK("30. disposition契约",
+          direct.disposition == Evaluator::Disposition::Unassigned
+          && verified.disposition == Evaluator::Disposition::VerifySuccess);
+}
+
+void domainIsolationTests()
+{
+    Evaluator e;
+    auto p = pair();
+
+    Evaluator::RulePair surface;
+    surface.laneId = QStringLiteral("surface-rule");
+    surface.domain = Evaluator::TargetDomain::Surface;
+    surface.trackType = 0;
+    surface.threatThreshold = 20;
+    surface.prewarningThreshold = 60;
+    surface.warningRuleId = QStringLiteral("surface-A");
+    surface.alarmRuleId = QStringLiteral("surface-B");
+
+    Evaluator::RulePair air = surface;
+    air.laneId = QStringLiteral("air-rule");
+    air.domain = Evaluator::TargetDomain::Air;
+    air.trackType = 3;
+    air.warningRuleId = QStringLiteral("air-A");
+    air.alarmRuleId = QStringLiteral("air-B");
+    p.rulePairs = {surface, air};
+
+    CHECK("31. 海空双通道配置", e.reset(p));
+
+    auto sea = target(QPointF(1, 1), 60, 60);
+    sea.domain = Evaluator::TargetDomain::Surface;
+    sea.laneId = surface.laneId;
+    sea.warning.conditionId = surface.warningRuleId;
+    sea.alarm.conditionId = surface.alarmRuleId;
+
+    auto aircraft = target(QPointF(9, 1), 20, 20);
+    aircraft.domain = Evaluator::TargetDomain::Air;
+    aircraft.laneId = air.laneId;
+    aircraft.warning.conditionId = air.warningRuleId;
+    aircraft.alarm.conditionId = air.alarmRuleId;
+
+    const auto first = e.evaluateCycle({sea, aircraft}, 1000);
+    CHECK("31. 相同数值ID的海空目标分别输出", first.size() == 2);
+
+    sea.position = QPointF(9, 1);
+    const auto second = e.evaluateCycle({sea, aircraft}, 8000);
+    bool surfaceDirect = false;
+    bool airDwell = false;
+    for (const auto& result : second) {
+        surfaceDirect = surfaceDirect
+            || (result.domain == Evaluator::TargetDomain::Surface
+                && result.reason == QStringLiteral("direct_entry"));
+        airDwell = airDwell
+            || (result.domain == Evaluator::TargetDomain::Air
+                && result.reason == QStringLiteral("alarm_area_dwell"));
+    }
+    CHECK("31. 海空状态互不覆盖", surfaceDirect && airDwell);
+}
+
+void schemeRoundTripTests()
+{
+    Evaluator e;
+    e.reset(pair());
+    e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
+
+    Evaluator::PairDefinition dailyFallback;
+    QString error;
+    CHECK("32. 切到日常方案时三态安全停用",
+          !e.reset(dailyFallback, &error) && !e.isEnabled());
+    CHECK("32. 日常方案兼容期不输出残留三态状态",
+          e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 100).isEmpty());
+
+    CHECK("32. 切回演示方案重新启用A/B", e.reset(pair(), &error));
+    const auto firstSeenInB = one(e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 200));
+    CHECK("32. 往返切换后旧资格已清除",
+          firstSeenInB.stage == Evaluator::Stage::Prewarning
+              && firstSeenInB.reason != QStringLiteral("direct_entry"));
+}
+
+Evaluator::AreaObservation observation(
+    const Evaluator::AreaKey& area,
+    Evaluator::AreaRole role,
+    int score,
+    const QString& conditionId)
+{
+    Evaluator::AreaObservation value;
+    value.area = area;
+    value.role = role;
+    value.laneId = QStringLiteral("surface");
+    value.trackType = 0;
+    value.threatThreshold = 20;
+    value.prewarningThreshold = 60;
+    value.evidence.available = true;
+    value.evidence.score = score;
+    value.evidence.conditionId = conditionId;
+    return value;
+}
+
+void multiAreaAnyToAnyTests()
+{
+    Evaluator::PolicyDefinition policy;
+    policy.enabled = true;
+    policy.dwellMs = 7000;
+    policy.warningAreas = {
+        rect(16, 0, 0, 2, 2),
+        rect(17, 4, 0, 6, 2),
+    };
+    policy.alarmAreas = {
+        rect(15, 8, 0, 10, 2),
+        rect(25, 18, 0, 20, 2),
+    };
+
+    Evaluator e;
+    QString error;
+    CHECK("33. 多A多B策略可启用", e.reset(policy, &error));
+
+    Evaluator::TargetSnapshot inA1;
+    inA1.targetId = 2001;
+    inA1.laneId = QStringLiteral("surface");
+    inA1.position = QPointF(1, 1);
+    inA1.observations = {
+        observation({3, 16}, Evaluator::AreaRole::Warning, 60, QStringLiteral("A1-rule")),
+        observation({3, 17}, Evaluator::AreaRole::Warning, 60, QStringLiteral("A2-rule")),
+        observation({3, 15}, Evaluator::AreaRole::Alarm, 60, QStringLiteral("B1-rule")),
+        observation({3, 25}, Evaluator::AreaRole::Alarm, 60, QStringLiteral("B2-rule")),
+    };
+    e.evaluateCycle({inA1}, 0);
+
+    Evaluator::TargetSnapshot inB2 = inA1;
+    inB2.position = QPointF(19, 1);
+    const auto result = one(e.evaluateCycle({inB2}, 100));
+    const Evaluator::AreaKey expectedQualification{3, 16};
+    const Evaluator::AreaKey expectedAlarm{3, 25};
+    CHECK("33. A1资格可用于B2直接告警",
+          result.stage == Evaluator::Stage::Alarm
+              && result.reason == QStringLiteral("direct_entry")
+              && result.qualificationArea == expectedQualification
+              && result.eventArea == expectedAlarm);
+
+    Evaluator::PolicyDefinition overlapping = policy;
+    overlapping.warningAreas[0] = rect(16, 0, 0, 4, 4);
+    overlapping.alarmAreas[1] = rect(25, 0, 0, 4, 4);
+    CHECK("34. 多区域重叠策略可启用", e.reset(overlapping, &error));
+    inA1.position = QPointF(-1, -1);
+    e.evaluateCycle({inA1}, 0);
+    inA1.position = QPointF(1, 1);
+    const auto sameCycle = one(e.evaluateCycle({inA1}, 100));
+    CHECK("34. 同周期取得任意A资格不能用于B",
+          sameCycle.stage == Evaluator::Stage::Prewarning
+              && sameCycle.reason != QStringLiteral("direct_entry"));
+
+    CHECK("35. 多B独立计时策略可重置", e.reset(policy, &error));
+    Evaluator::TargetSnapshot dwell = inA1;
+    for (Evaluator::AreaObservation& value : dwell.observations)
+        value.evidence.score = 20;
+    dwell.position = QPointF(9, 1);
+    e.evaluateCycle({dwell}, 1000);
+    e.evaluateCycle({dwell}, 7900);
+    dwell.position = QPointF(19, 1);
+    const auto enteredB2 = one(e.evaluateCycle({dwell}, 8000));
+    const auto fullB2Dwell = one(e.evaluateCycle({dwell}, 15000));
+    CHECK("35. B2不继承B1停留时间",
+          enteredB2.stage == Evaluator::Stage::Threat
+              && enteredB2.alarmDwellMs == 0
+              && fullB2Dwell.stage == Evaluator::Stage::Alarm
+              && fullB2Dwell.reason == QStringLiteral("alarm_area_dwell")
+              && fullB2Dwell.eventArea == expectedAlarm);
+
+    CHECK("36. 免告警测试策略可重置", e.reset(policy, &error));
+    dwell.position = QPointF(9, 1);
+    dwell.suppressNewEvent = true;
+    CHECK("36. 免告警区阻止新事件", e.evaluateCycle({dwell}, 1000).isEmpty());
+    CHECK("36. 免告警区内停留不创建HIGH", e.evaluateCycle({dwell}, 9000).isEmpty());
+    dwell.suppressNewEvent = false;
+    const auto suppressionReleased = one(e.evaluateCycle({dwell}, 9001));
+    CHECK("36. 离开免告警后从当前时刻开始B计时",
+          suppressionReleased.stage == Evaluator::Stage::Threat
+              && suppressionReleased.alarmDwellMs == 0);
+
+    CHECK("36. 已有事件测试策略可重置", e.reset(policy, &error));
+    dwell.position = QPointF(1, 1);
+    dwell.suppressNewEvent = false;
+    CHECK("36. 先形成LOW活动事件",
+          one(e.evaluateCycle({dwell}, 0)).stage == Evaluator::Stage::Threat);
+    dwell.position = QPointF(9, 1);
+    dwell.suppressNewEvent = true;
+    for (Evaluator::AreaObservation& value : dwell.observations) {
+        value.evidence.opticSeen = value.role == Evaluator::AreaRole::Alarm
+            && value.area == Evaluator::AreaKey{3, 15};
+    }
+    const auto activeContinues = one(e.evaluateCycle({dwell}, 100));
+    CHECK("36. 已有事件在免告警区继续升级",
+          activeContinues.stage == Evaluator::Stage::Alarm
+              && activeContinues.reason == QStringLiteral("optic"));
+}
+
+} // namespace
+
+int main(int argc, char** argv)
+{
+    QCoreApplication app(argc, argv);
+    scoreContractTests();
+    spatialRelationshipTests();
+    entryOrderingTests();
+    dwellOpticAndLifecycleTests();
+    configurationAndOutputTests();
+    domainIsolationTests();
+    schemeRoundTripTests();
+    multiAreaAnyToAnyTests();
+    qInfo() << "AreaEscalationEvaluator tests completed, failures=" << failures;
+    return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}

@@ -891,11 +891,27 @@ void CustomConfig::reloadAlarmConfigFromDb(const QString& scope)
     const QString s = scope.trimmed().isEmpty() ? QStringLiteral("all") : scope.trimmed();
     const bool all = (s == QLatin1String("all"));
     if (all || s == QLatin1String("alarm_rules")) {
-        m_mapAlarmRule = dbHelper.getAlarmRule();
-        m_alarmArea = dbHelper.getAreaInfo();
-        m_mapSchemeProtectAreas = dbHelper.getActiveSchemeProtectAreas();
+        // 数据库读取放在锁外；完整快照在一个写锁临界区内一次性发布。
+        const QMap<QString, AlarmRule> nextAlarmRules = dbHelper.getAlarmRule();
+        const QList<AreaInfo> nextAlarmAreas = dbHelper.getAreaInfo();
+        const QMap<QString, QPair<int, int>> nextProtectAreas =
+            dbHelper.getActiveSchemeProtectAreas();
+        int clearedAlarmCount = 0;
+        {
+            QWriteLocker configLocker(&m_alarmConfigLock);
+            m_mapAlarmRule = nextAlarmRules;
+            m_alarmArea = nextAlarmAreas;
+            m_mapSchemeProtectAreas = nextProtectAreas;
+            // 方案切换/规则重载是事件生命周期边界：清除旧方案内存快照，
+            // 避免演示方案与日常方案往返时继续上报旧 condition_id。
+            QMutexLocker locker(&m_alarmDataMutex);
+            clearedAlarmCount = m_mapAlarmData.size();
+            m_mapAlarmData.clear();
+            ++m_alarmConfigGeneration;
+        }
         qInfo() << "热更新 alarm_rules: alarm_setting" << m_mapAlarmRule.size()
-                << "area" << m_alarmArea.size();
+                << "area" << m_alarmArea.size()
+                << "cleared_active_events" << clearedAlarmCount;
     }
     if (all || s == QLatin1String("threat_params")) {
         m_listThreatAssessmentParams = dbHelper.getThreatAssessmentParams();
@@ -1186,6 +1202,19 @@ void CustomConfig::tickAlarmGrpcSnapshot()
 AlarmEffectiveDisposition CustomConfig::resolveRuleAlarmDisposition(const AlarmData& alarmData)
 {
     AlarmEffectiveDisposition out;
+    // 三态升级的处置口径由升级原因决定，不能再被识别规则事后覆盖：
+    // 持资格直接入 B 为 UNASSIGNED；光电/连续 7 秒为 VERIFY_SUCCESS。
+    if (alarmData.event_stage == 3) {
+        if (alarmData.escalation_reason == QLatin1String("direct_entry")) {
+            out.task_status = 0;
+            return out;
+        }
+        if (alarmData.escalation_reason == QLatin1String("optic")
+            || alarmData.escalation_reason == QLatin1String("alarm_area_dwell")) {
+            out.task_status = 3;
+            return out;
+        }
+    }
     switch (alarmData.task_status) {
     case 0:
         out.task_status = 0;
@@ -1986,6 +2015,26 @@ void CustomConfig::LoadConfig()
                 .value(QStringLiteral("Basic/NewTrackStructGrpcAddr"), QStringLiteral("192.168.18.141:60055"))
                 .toString()
                 .trimmed();
+        {
+            const QVariant configured = settings.value(
+                QStringLiteral("Basic/VirtualTrackSourceAllowList"),
+                QStringLiteral("virtual_new_track_struct_grpc_client"));
+            QStringList values = configured.canConvert<QStringList>()
+                ? configured.toStringList()
+                : configured.toString().split(',', QString::SkipEmptyParts);
+            m_struBasicConfig.m_virtualTrackSourceAllowList.clear();
+            for (const QString& value : values) {
+                const QString sourceId = value.trimmed();
+                if (!sourceId.isEmpty()
+                    && !m_struBasicConfig.m_virtualTrackSourceAllowList.contains(sourceId)) {
+                    m_struBasicConfig.m_virtualTrackSourceAllowList.append(sourceId);
+                }
+            }
+            if (m_struBasicConfig.m_virtualTrackSourceAllowList.isEmpty()) {
+                m_struBasicConfig.m_virtualTrackSourceAllowList.append(
+                    QStringLiteral("virtual_new_track_struct_grpc_client"));
+            }
+        }
         const QString radarTx = settings
                                     .value(QStringLiteral("Basic/RadarTrackTransport"), QStringLiteral("dds"))
                                     .toString()
@@ -1998,6 +2047,8 @@ void CustomConfig::LoadConfig()
                 .value(QStringLiteral("Basic/FusionTrackStreamGrpcAddr"), QStringLiteral("192.168.18.141:60056"))
                 .toString()
                 .trimmed();
+        qInfo() << "NewTrackStruct 虚兵来源白名单"
+                << m_struBasicConfig.m_virtualTrackSourceAllowList;
 
         {
             const QString routesCsv = settings
@@ -2313,6 +2364,9 @@ void CustomConfig::LoadConfig()
     m_alarmLogic.speedDoubleCheckFuseTrackOnly = settings.value("AlarmLogic/SpeedDoubleCheckFuseTrackOnly", 1).toInt();
     m_alarmLogic.defaultThreatScore = settings.value("AlarmLogic/DefaultThreatScore", 90).toInt();
 
+    m_areaEscalation.enabled = settings.value(QStringLiteral("AreaEscalation/Enabled"), 0).toInt();
+    qInfo() << "AreaEscalation 配置: enabled=" << m_areaEscalation.enabled;
+
     m_suspiciousTarget.enabled = settings.value(QStringLiteral("SuspiciousTarget/Enabled"), 0).toInt();
     m_suspiciousTarget.judgeIntervalMs = settings.value(QStringLiteral("SuspiciousTarget/JudgeIntervalMs"), 5000).toInt();
     m_suspiciousTarget.speedLowThresholdMps =
@@ -2495,6 +2549,3 @@ float CustomConfig::valF(string paramName)
     if (str != "") value = stof(str);
     return value;
 }
-
-
-

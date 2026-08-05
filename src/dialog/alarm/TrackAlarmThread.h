@@ -2,6 +2,7 @@
 
 #include <QThread>
 #include "datastruct/commonStruct.h"
+#include "dialog/alarm/AreaEscalationEvaluator.h"
 #include"customconfig.h"
 class TrackAlarmThread : public QThread
 {
@@ -14,16 +15,38 @@ protected:
     void run() override;
 
 private:
+    struct AreaEscalationBinding {
+        AreaEscalationEvaluator::AreaDefinition area;
+        AlarmArea runtimeArea;
+        AreaEscalationEvaluator::AreaRole role = AreaEscalationEvaluator::AreaRole::Warning;
+        AreaEscalationEvaluator::TargetDomain domain = AreaEscalationEvaluator::TargetDomain::Surface;
+        QString laneId;
+        int trackType = 0;
+        AlarmRule rule;
+    };
+
     void processAlarms();
     void updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule info,int type,int radarSourceId = 0);
     bool isTrackInGroupArea(QPointF pt);
     bool isTrackInGroupAreaByGroupId(QPointF pt, int groupId);
     bool isTrackInOtherAlarmArea(QPolygonF polyNow, QPointF pt, QList< AlarmRule> waringList,int index);
-    void SaveToDB(AlarmRule info, qint64 targetId, float lat, float lon, float speed, float dir, float dis, int TargetType, int threatScore, int timestampSec, int radarSourceId = 0, const QString& alarmContent = QString());
+    void SaveToDB(AlarmRule info, qint64 targetId, float lat, float lon, float speed, float dir, float dis, int TargetType, int threatScore, int timestampSec, int radarSourceId = 0, const QString& alarmContent = QString(), int eventStage = 3);
     int convertTargetTypeStringToBitmask(const QString& targetType);
     double calculateThreatLevel(const SPxPacketTrackExtended& track, const DataAccessLayer::DetectionTypeResult& detectionResult, const ThreatAssessmentParams& threatParams, bool hasProtectArea = false, const QPointF& protectCenter = QPointF(), double entryAngle = 0.0);
     ThreatAssessmentResult calculateThreatAssessment(const SPxPacketTrackExtended& track, const DataAccessLayer::DetectionTypeResult& detectionResult, const ThreatAssessmentParams& threatParams, bool hasProtectArea = false, const QPointF& protectCenter = QPointF(), double entryAngle = 0.0);
     double calculateTimeToProtectArea(const SPxPacketTrackExtended& track, const QPointF& protectCenter, double protectRadius);
+    bool configureAreaEscalation(const QList<AlarmRule>& rules);
+    void processAreaEscalation();
+    AreaEscalationEvaluator::AreaEvidence evaluateAreaEscalationEvidence(
+        const AlarmRule& rule,
+        const SPxPacketTrackExtended& track,
+        const DataAccessLayer::DetectionTypeResult& detection,
+        bool previousSpeedPassed,
+        bool insideArea);
+    void applyAreaEscalationResult(const AreaEscalationEvaluator::Result& result);
+    bool findAlarmArea(int groupId, int areaId, AlarmArea* out) const;
+    bool containsCurrentPoint(const AlarmArea& area, const QPointF& point) const;
+    AreaEscalationEvaluator::AreaDefinition toEscalationArea(const AlarmArea& area) const;
     int m_alarmType;
     bool m_running;
     float m_uavLat;
@@ -43,6 +66,12 @@ private:
     // 速度判定状态（键为 target_id 或雷达/AIS 业务 id）
     QMap<qint64, bool> m_mapSpeedLastCheck;
     qint64 m_lastSpeedCheckMapClearMs = 0; // ��¼ÿ��Ŀ���ϴ��ٶ��ж����
+    AreaEscalationEvaluator m_areaEscalationEvaluator;
+    bool m_areaEscalationActive = false;
+    quint64 m_areaEscalationGeneration = 0;
+    QList<AreaEscalationBinding> m_areaEscalationBindings;
+    QSet<QString> m_areaEscalationClaimedConditionIds;
+    QHash<QString, bool> m_areaEscalationPreviousSpeed;
 signals:
 
     void newAlarmDetected(QString);
@@ -54,4 +83,4 @@ private slots:
     
 
 
-}; 
+};
