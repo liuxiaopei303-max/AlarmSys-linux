@@ -17,6 +17,9 @@ struct AlarmContentBuildInput {
     double heightM = 0.0;
     int threatScore = 0;
     bool hasProtectArea = false;
+    QString protectionReferenceSource;
+    QPointF protectionReferenceCenter;
+    double protectionReferenceRadiusM = 0.0;
     bool isAirTrack = false;
     /** 威胁度单项分（calculateThreatAssessment 产出）；hasThreatBreakdown=false 时不写入证据链 */
     bool hasThreatBreakdown = false;

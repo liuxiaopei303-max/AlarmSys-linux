@@ -364,6 +364,12 @@ QString buildRuleAlarmContent(const AlarmContentBuildInput& input)
     obj.insert(QStringLiteral("target_type"), typeRaw);
     obj.insert(QStringLiteral("target_type_label"), typeLabel);
     obj.insert(QStringLiteral("angle_label"), angleLabel);
+    if (input.hasProtectArea) {
+        obj.insert(QStringLiteral("protection_reference_source"), input.protectionReferenceSource);
+        obj.insert(QStringLiteral("protection_reference_lat"), input.protectionReferenceCenter.x());
+        obj.insert(QStringLiteral("protection_reference_lon"), input.protectionReferenceCenter.y());
+        obj.insert(QStringLiteral("protection_reference_radius_m"), input.protectionReferenceRadiusM);
+    }
 
     if (input.hasThreatBreakdown) {
         const ThreatAssessmentResult& t = input.threatBreakdown;

@@ -3,6 +3,7 @@
 #include <QThread>
 #include "datastruct/commonStruct.h"
 #include "dialog/alarm/AreaEscalationEvaluator.h"
+#include "dialog/alarm/AreaEscalationProtectionResolver.h"
 #include"customconfig.h"
 class TrackAlarmThread : public QThread
 {
@@ -47,6 +48,9 @@ private:
     bool findAlarmArea(int groupId, int areaId, AlarmArea* out) const;
     bool containsCurrentPoint(const AlarmArea& area, const QPointF& point) const;
     AreaEscalationEvaluator::AreaDefinition toEscalationArea(const AlarmArea& area) const;
+    AreaEscalationProtectionResolver::Context resolveProtectionContext(
+        const AlarmRule& rule,
+        AreaEscalationEvaluator::TargetDomain domain) const;
     int m_alarmType;
     bool m_running;
     float m_uavLat;

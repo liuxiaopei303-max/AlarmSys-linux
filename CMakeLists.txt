@@ -38,8 +38,10 @@ set(ALARM_SOURCES
     "${ALARM_SRC_DIR}/alarm_geoproj.cpp"
     "${ALARM_SRC_DIR}/customconfig.cpp"
     "${ALARM_SRC_DIR}/common/commonfunc.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AlarmAreaGeometryParser.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/TrackAlarmThread.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationEvaluator.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationProtectionResolver.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/SuspiciousTargetThread.cpp"
     "${ALARM_SRC_DIR}/dialog/analysis/TargetTypeFusionThread.cpp"
     "${ALARM_SRC_DIR}/dialog/analysis/TargetTypeFusionLogic.cpp"
@@ -168,6 +170,30 @@ set_target_properties(area_escalation_evaluator_test PROPERTIES
     AUTOMOC OFF
 )
 add_test(NAME area_escalation_evaluator_test COMMAND area_escalation_evaluator_test)
+
+add_executable(area_escalation_protection_resolver_test
+    "${CMAKE_SOURCE_DIR}/tests/AreaEscalationProtectionResolverTest.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationProtectionResolver.cpp"
+)
+target_include_directories(area_escalation_protection_resolver_test PRIVATE "${ALARM_SRC_DIR}")
+target_link_libraries(area_escalation_protection_resolver_test PRIVATE Qt5::Core Qt5::Gui)
+set_target_properties(area_escalation_protection_resolver_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    AUTOMOC OFF
+)
+add_test(NAME area_escalation_protection_resolver_test COMMAND area_escalation_protection_resolver_test)
+
+add_executable(alarm_area_geometry_parser_test
+    "${CMAKE_SOURCE_DIR}/tests/AlarmAreaGeometryParserTest.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AlarmAreaGeometryParser.cpp"
+)
+target_include_directories(alarm_area_geometry_parser_test PRIVATE "${ALARM_SRC_DIR}")
+target_link_libraries(alarm_area_geometry_parser_test PRIVATE Qt5::Core Qt5::Gui)
+set_target_properties(alarm_area_geometry_parser_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    AUTOMOC OFF
+)
+add_test(NAME alarm_area_geometry_parser_test COMMAND alarm_area_geometry_parser_test)
 
 add_executable(alarm_grpc_snapshot_mapping_test
     "${CMAKE_SOURCE_DIR}/tests/AlarmGrpcSnapshotMappingTest.cpp"

@@ -354,6 +354,7 @@ public:
     /** condition_id + "_" + track_id -> 最近一次触发告警的毫秒时间戳；持续告警判定用，避免 m_mapAlarmData 被提前清理后查不到 */
     QMap<QString, qint64> m_mapConditionTrackLastAlarmMs;
     QList<ThreatAssessmentParams> m_listThreatAssessmentParams; //威胁度研判参数
+    QString m_activeAlarmSchemeId; // 与 alarm_setting 同一代次发布的激活方案 ID
     QMap<QString, QPair<int, int>> m_mapSchemeProtectAreas; //方案保护区信息 <"groupId_areaId", <protectGroupId, protectAreaId>>
     QMap<int, TargetInfoFilter> m_mapTargetInfoFilter; //目标信息过滤
     QString m_nCurCheckAlarmID = ""; //重点关注告警id

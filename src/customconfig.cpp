@@ -420,6 +420,7 @@ CustomConfig::CustomConfig()
     m_alarmArea = dbHelper.getAreaInfo();
     m_mapTargetInfoFilter = dbHelper.getTargetInfoFilter();
     m_listThreatAssessmentParams = dbHelper.getThreatAssessmentParams();
+    m_activeAlarmSchemeId = dbHelper.getActiveSchemeId();
     m_mapSchemeProtectAreas = dbHelper.getActiveSchemeProtectAreas();
 
     m_gNetworkManager = new QNetworkAccessManager;
@@ -894,6 +895,7 @@ void CustomConfig::reloadAlarmConfigFromDb(const QString& scope)
         // 数据库读取放在锁外；完整快照在一个写锁临界区内一次性发布。
         const QMap<QString, AlarmRule> nextAlarmRules = dbHelper.getAlarmRule();
         const QList<AreaInfo> nextAlarmAreas = dbHelper.getAreaInfo();
+        const QString nextActiveSchemeId = dbHelper.getActiveSchemeId();
         const QMap<QString, QPair<int, int>> nextProtectAreas =
             dbHelper.getActiveSchemeProtectAreas();
         int clearedAlarmCount = 0;
@@ -901,6 +903,7 @@ void CustomConfig::reloadAlarmConfigFromDb(const QString& scope)
             QWriteLocker configLocker(&m_alarmConfigLock);
             m_mapAlarmRule = nextAlarmRules;
             m_alarmArea = nextAlarmAreas;
+            m_activeAlarmSchemeId = nextActiveSchemeId;
             m_mapSchemeProtectAreas = nextProtectAreas;
             // 方案切换/规则重载是事件生命周期边界：清除旧方案内存快照，
             // 避免演示方案与日常方案往返时继续上报旧 condition_id。
@@ -911,6 +914,7 @@ void CustomConfig::reloadAlarmConfigFromDb(const QString& scope)
         }
         qInfo() << "热更新 alarm_rules: alarm_setting" << m_mapAlarmRule.size()
                 << "area" << m_alarmArea.size()
+                << "scheme" << m_activeAlarmSchemeId
                 << "cleared_active_events" << clearedAlarmCount;
     }
     if (all || s == QLatin1String("threat_params")) {
@@ -2365,7 +2369,39 @@ void CustomConfig::LoadConfig()
     m_alarmLogic.defaultThreatScore = settings.value("AlarmLogic/DefaultThreatScore", 90).toInt();
 
     m_areaEscalation.enabled = settings.value(QStringLiteral("AreaEscalation/Enabled"), 0).toInt();
-    qInfo() << "AreaEscalation 配置: enabled=" << m_areaEscalation.enabled;
+    m_areaEscalation.protectionReferenceEnabled =
+        settings.value(QStringLiteral("AreaEscalation/ProtectionReferenceEnabled"), 0).toInt();
+    m_areaEscalation.protectionReferenceSchemeId = settings.value(
+        QStringLiteral("AreaEscalation/ProtectionReferenceSchemeId"), QString()).toString().trimmed();
+    m_areaEscalation.protectionReferenceDomains = settings.value(
+        QStringLiteral("AreaEscalation/ProtectionReferenceDomains"), QStringLiteral("SURFACE"))
+        .toString().trimmed().toUpper();
+    m_areaEscalation.protectionReferenceLatitude = settings.value(
+        QStringLiteral("AreaEscalation/ProtectionReferenceLatitude"), 0.0).toDouble();
+    m_areaEscalation.protectionReferenceLongitude = settings.value(
+        QStringLiteral("AreaEscalation/ProtectionReferenceLongitude"), 0.0).toDouble();
+    const bool validReferenceCoordinates =
+        m_areaEscalation.protectionReferenceLatitude >= -90.0
+        && m_areaEscalation.protectionReferenceLatitude <= 90.0
+        && m_areaEscalation.protectionReferenceLongitude >= -180.0
+        && m_areaEscalation.protectionReferenceLongitude <= 180.0;
+    if (m_areaEscalation.protectionReferenceEnabled
+        && (m_areaEscalation.protectionReferenceSchemeId.isEmpty()
+            || m_areaEscalation.protectionReferenceDomains.isEmpty()
+            || !validReferenceCoordinates)) {
+        qCritical() << "AreaEscalation 保护参考点配置无效，已关闭覆盖"
+                    << "scheme" << m_areaEscalation.protectionReferenceSchemeId
+                    << "domains" << m_areaEscalation.protectionReferenceDomains
+                    << "lat" << m_areaEscalation.protectionReferenceLatitude
+                    << "lon" << m_areaEscalation.protectionReferenceLongitude;
+        m_areaEscalation.protectionReferenceEnabled = 0;
+    }
+    qInfo() << "AreaEscalation 配置: enabled=" << m_areaEscalation.enabled
+            << "referenceEnabled=" << m_areaEscalation.protectionReferenceEnabled
+            << "referenceScheme=" << m_areaEscalation.protectionReferenceSchemeId
+            << "referenceDomains=" << m_areaEscalation.protectionReferenceDomains
+            << "referenceLatLon=" << m_areaEscalation.protectionReferenceLatitude
+            << m_areaEscalation.protectionReferenceLongitude;
 
     m_suspiciousTarget.enabled = settings.value(QStringLiteral("SuspiciousTarget/Enabled"), 0).toInt();
     m_suspiciousTarget.judgeIntervalMs = settings.value(QStringLiteral("SuspiciousTarget/JudgeIntervalMs"), 5000).toInt();

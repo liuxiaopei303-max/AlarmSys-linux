@@ -129,6 +129,11 @@ struct AlarmLogicConfig {
 /** 三态区域升级运行开关（Config.ini [AreaEscalation]）。 */
 struct AreaEscalationConfig {
     int enabled = 0; /**< 1=启用显式 A(alarm_level=2) / B(alarm_level=3) 三态逻辑 */
+    int protectionReferenceEnabled = 0; /**< 1=允许按方案/环境域覆盖保护计算圆心 */
+    QString protectionReferenceSchemeId; /**< 仅该激活方案使用配置参考点 */
+    QString protectionReferenceDomains = QStringLiteral("SURFACE"); /**< 逗号分隔：SURFACE/AIR */
+    double protectionReferenceLatitude = 0.0;
+    double protectionReferenceLongitude = 0.0;
 };
 
 /** 可疑目标研判（Config.ini [SuspiciousTarget]）；默认经告警快照嵌入 TargetObject.alarms */

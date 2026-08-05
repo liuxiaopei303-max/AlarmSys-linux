@@ -1,4 +1,5 @@
 #include "TrackAlarmThread.h"
+#include "AlarmAreaGeometryParser.h"
 #include "AlarmContentBuilder.h"
 #include "AlarmFileLogger.h"
 #include "alarm_geoproj.h"
@@ -177,31 +178,14 @@ bool parseAreaRect(const QString& csv, QRectF* out)
 
 void appendPolygonPoints(const QString& areaPoints, int areaType, AlarmArea& alertArea)
 {
-	const QStringList parts = areaPoints.split(QLatin1Char(','), QString::SkipEmptyParts);
-	if (parts.isEmpty())
+	const AlarmAreaPointList parsed = parseAlarmAreaPointList(areaPoints);
+	if (!parsed.valid)
 		return;
-	bool okCount = false;
-	const int pSize = parts.at(0).trimmed().toInt(&okCount);
-	if (!okCount || pSize < 2)
-		return;
-	const int required = 1 + (pSize - 1) * 2;
-	if (parts.size() < required)
-		return;
-
-	for (int j = 0; j < pSize - 1; ++j) {
-		const int idxX = j * 2 + 1;
-		const int idxY = j * 2 + 2;
-		bool okX = false;
-		bool okY = false;
-		const float x = parts.at(idxX).trimmed().toFloat(&okX);
-		const float y = parts.at(idxY).trimmed().toFloat(&okY);
-		if (!okX || !okY)
-			continue;
-		const QPointF pt(x, y);
+	for (const QPointF& point : parsed.points) {
 		if (areaType == 4)
-			alertArea.m_road.append(pt);
+			alertArea.m_road.append(point);
 		else if (areaType == 3)
-			alertArea.m_alertAreaPolygon.append(pt);
+			alertArea.m_alertAreaPolygon.append(point);
 	}
 }
 
@@ -1420,8 +1404,9 @@ void TrackAlarmThread::getAlarmArea()
 				continue;
 			}
 			alertArea1.m_alertAreaPolygon = QPolygonF(alertArea1.m_alertAreaRect);
-		} else if (alertArea1.m_alertAreaType == 3 && alertArea1.m_alertAreaPolygon.isEmpty()) {
-			qWarning() << "getAlarmArea skip type=3 empty polygon group" << m_area1.groupID
+		} else if (alertArea1.m_alertAreaType == 3
+			&& alertArea1.m_alertAreaPolygon.size() < 3) {
+			qWarning() << "getAlarmArea skip type=3 insufficient polygon points group" << m_area1.groupID
 			           << "area" << m_area1.areaID << "name" << m_area1.areaName;
 			continue;
 		}
@@ -1478,6 +1463,31 @@ bool TrackAlarmThread::findAlarmArea(int groupId, int areaId, AlarmArea* out) co
 		}
 	}
 	return false;
+}
+
+AreaEscalationProtectionResolver::Context TrackAlarmThread::resolveProtectionContext(
+	const AlarmRule& rule,
+	AreaEscalationEvaluator::TargetDomain domain) const
+{
+	AreaEscalationProtectionResolver::Request request;
+	request.config = gConfig->m_areaEscalation;
+	request.activeSchemeId = gConfig->m_activeAlarmSchemeId;
+	request.targetDomain = escalationDomainName(domain);
+
+	const QString areaKey = QStringLiteral("%1_%2").arg(rule.group_id).arg(rule.area_id);
+	if (gConfig->m_mapSchemeProtectAreas.contains(areaKey)) {
+		const QPair<int, int> protectKey = gConfig->m_mapSchemeProtectAreas.value(areaKey);
+		AlarmArea protectArea;
+		if (findAlarmArea(protectKey.first, protectKey.second, &protectArea)
+			&& protectArea.m_alertAreaType == 2) {
+			request.databaseCircleAvailable = true;
+			request.databaseCenter = protectArea.m_startP;
+			request.databaseRadiusMeters =
+				AreaEscalationProtectionResolver::distanceMeters(
+					protectArea.m_startP, protectArea.m_endP);
+		}
+	}
+	return AreaEscalationProtectionResolver::resolve(request);
 }
 
 bool TrackAlarmThread::containsCurrentPoint(const AlarmArea& area, const QPointF& point) const
@@ -1709,26 +1719,20 @@ AreaEscalationEvaluator::AreaEvidence TrackAlarmThread::evaluateAreaEscalationEv
 		reject(&evidence.hard.height, QStringLiteral("height"));
 	}
 
-	bool hasProtectArea = false;
-	QPointF protectCenter;
-	AlarmArea protectArea;
-	const QString areaKey = QStringLiteral("%1_%2").arg(rule.group_id).arg(rule.area_id);
-	if (gConfig->m_mapSchemeProtectAreas.contains(areaKey)) {
-		const QPair<int, int> protectKey = gConfig->m_mapSchemeProtectAreas.value(areaKey);
-		if (findAlarmArea(protectKey.first, protectKey.second, &protectArea)
-			&& protectArea.m_alertAreaType == 2) {
-			hasProtectArea = true;
-			protectCenter = protectArea.m_startP; // 数据库保护区几何圆心，禁止硬编码
-		}
-	}
+	const AreaEscalationEvaluator::TargetDomain targetDomain = rule.track_type == 3
+		? AreaEscalationEvaluator::TargetDomain::Air
+		: AreaEscalationEvaluator::TargetDomain::Surface;
+	const AreaEscalationProtectionResolver::Context protection =
+		resolveProtectionContext(rule, targetDomain);
+	const bool hasProtectArea = protection.available;
+	const QPointF protectCenter = protection.center;
 
 	double angleToCheck = track.norm.min.courseDegrees;
 	if (hasProtectArea) {
-		const double bearingToCenter = calculateBearing(
-			track.latDegs, track.longDegs, protectCenter.x(), protectCenter.y());
-		angleToCheck = std::abs(track.norm.min.courseDegrees - bearingToCenter);
-		if (angleToCheck > 180.0)
-			angleToCheck = 360.0 - angleToCheck;
+		const double bearingToCenter = AreaEscalationProtectionResolver::bearingDegrees(
+			QPointF(track.latDegs, track.longDegs), protectCenter);
+		angleToCheck = AreaEscalationProtectionResolver::attackAngleDegrees(
+			track.norm.min.courseDegrees, bearingToCenter);
 	}
 	if (rule.course_min != rule.course_max) {
 		const bool anglePassed = rule.course_min <= rule.course_max
@@ -1739,20 +1743,15 @@ AreaEscalationEvaluator::AreaEvidence TrackAlarmThread::evaluateAreaEscalationEv
 	}
 
 	if (rule.dist_to_protect_area >= 0 && hasProtectArea) {
-		const double centerDistance = CommonFunc::GetDistance(
-			track.longDegs, track.latDegs, protectCenter.y(), protectCenter.x());
-		const double protectRadius = CommonFunc::GetDistance(
-			protectArea.m_startP.y(), protectArea.m_startP.x(),
-			protectArea.m_endP.y(), protectArea.m_endP.x());
-		const double edgeDistance = std::max(0.0, centerDistance - protectRadius);
+		const double centerDistance = AreaEscalationProtectionResolver::distanceMeters(
+			QPointF(track.latDegs, track.longDegs), protectCenter);
+		const double edgeDistance = std::max(0.0, centerDistance - protection.radiusMeters);
 		if (edgeDistance >= rule.dist_to_protect_area)
 			reject(&evidence.hard.protectDistance, QStringLiteral("protect_distance"));
 	}
 	if (rule.entry_time > 0 && hasProtectArea) {
-		const double protectRadius = CommonFunc::GetDistance(
-			protectArea.m_startP.y(), protectArea.m_startP.x(),
-			protectArea.m_endP.y(), protectArea.m_endP.x());
-		const double seconds = calculateTimeToProtectArea(track, protectCenter, protectRadius);
+		const double seconds = calculateTimeToProtectArea(
+			track, protectCenter, protection.radiusMeters);
 		if (seconds < 0.0 || seconds > rule.entry_time * 60.0)
 			reject(&evidence.hard.entryTime, QStringLiteral("entry_time"));
 	}
@@ -2026,28 +2025,17 @@ void TrackAlarmThread::applyAreaEscalationResult(
 		evidenceTrack.longDegs = result.currentPosition.y();
 		evidenceTrack.norm.min.courseDegrees = result.courseDeg;
 		evidenceTrack.norm.min.speedMps = result.speedMps;
-		bool hasProtectArea = false;
-		QPointF protectCenter;
-		AlarmArea protectArea;
-		const QString areaKey = QStringLiteral("%1_%2").arg(rule.group_id).arg(rule.area_id);
-		if (gConfig->m_mapSchemeProtectAreas.contains(areaKey)) {
-			const QPair<int, int> protectKey =
-				gConfig->m_mapSchemeProtectAreas.value(areaKey);
-			if (findAlarmArea(protectKey.first, protectKey.second, &protectArea)
-				&& protectArea.m_alertAreaType == 2) {
-				hasProtectArea = true;
-				protectCenter = protectArea.m_startP;
-			}
-		}
+		const AreaEscalationProtectionResolver::Context protection =
+			resolveProtectionContext(rule, result.domain);
+		const bool hasProtectArea = protection.available;
+		const QPointF protectCenter = protection.center;
 
 		double attackAngle = evidenceTrack.norm.min.courseDegrees;
 		if (hasProtectArea) {
-			const double bearingToCenter = calculateBearing(
-				evidenceTrack.latDegs, evidenceTrack.longDegs,
-				protectCenter.x(), protectCenter.y());
-			attackAngle = std::abs(evidenceTrack.norm.min.courseDegrees - bearingToCenter);
-			if (attackAngle > 180.0)
-				attackAngle = 360.0 - attackAngle;
+			const double bearingToCenter = AreaEscalationProtectionResolver::bearingDegrees(
+				QPointF(evidenceTrack.latDegs, evidenceTrack.longDegs), protectCenter);
+			attackAngle = AreaEscalationProtectionResolver::attackAngleDegrees(
+				evidenceTrack.norm.min.courseDegrees, bearingToCenter);
 		}
 
 		ThreatAssessmentParams threatParams(rule.group_id, rule.area_id);
@@ -2069,6 +2057,9 @@ void TrackAlarmThread::applyAreaEscalationResult(
 		readableInput.heightM = evidenceTrack.altitudeMetres;
 		readableInput.threatScore = result.score;
 		readableInput.hasProtectArea = hasProtectArea;
+		readableInput.protectionReferenceSource = protection.sourceName();
+		readableInput.protectionReferenceCenter = protection.center;
+		readableInput.protectionReferenceRadiusM = protection.radiusMeters;
 		readableInput.isAirTrack = isAir;
 		readableInput.hasThreatBreakdown = true;
 		readableInput.threatBreakdown = assessment;
@@ -2119,10 +2110,13 @@ void TrackAlarmThread::applyAreaEscalationResult(
 	}
 
 	if (result.stageChanged) {
+		const AreaEscalationProtectionResolver::Context protection =
+			resolveProtectionContext(rule, result.domain);
 		const QString log = QStringLiteral(
 			"AreaEscalation upgrade------domain:%1 lane:%2 target:%3 qualificationArea:%4/%5 eventArea:%6/%7 stage:%8 reason:%9 "
 			"qualificationTime:%10 alarmEntryTime:%11 dwellMs:%12 previous:(%13,%14) current:(%15,%16) "
-			"course:%17 speed:%18 score:%19 thresholds:%20/%21 hard:[%22] warningToAlarmMs:%23 geometry:[%24]")
+			"course:%17 speed:%18 score:%19 thresholds:%20/%21 hard:[%22] warningToAlarmMs:%23 geometry:[%24] "
+			"protectReference:%25 center:(%26,%27) radiusM:%28 dbCenter:(%29,%30)")
 			.arg(escalationDomainName(result.domain), result.laneId)
 			.arg(result.targetId)
 			.arg(result.qualificationArea.groupId).arg(result.qualificationArea.areaId)
@@ -2133,7 +2127,12 @@ void TrackAlarmThread::applyAreaEscalationResult(
 			.arg(result.currentPosition.x(), 0, 'f', 8).arg(result.currentPosition.y(), 0, 'f', 8)
 			.arg(result.courseDeg, 0, 'f', 2).arg(result.speedMps, 0, 'f', 2)
 			.arg(result.score).arg(result.threatThreshold).arg(result.prewarningThreshold)
-			.arg(result.hardConditions).arg(result.warningToAlarmMs).arg(result.entryGeometry);
+			.arg(result.hardConditions).arg(result.warningToAlarmMs).arg(result.entryGeometry)
+			.arg(protection.sourceName())
+			.arg(protection.center.x(), 0, 'f', 8).arg(protection.center.y(), 0, 'f', 8)
+			.arg(protection.radiusMeters, 0, 'f', 1)
+			.arg(protection.databaseCenter.x(), 0, 'f', 8)
+			.arg(protection.databaseCenter.y(), 0, 'f', 8);
 		qInfo().noquote() << log;
 		AlarmFileLogger::logNewAlarmTrack(log);
 	}
