@@ -2065,7 +2065,7 @@ struct AlarmData {
     qint64 threat_time_ms = 0;
     /** 仅内存/gRPC 使用：0=旧事件，1=LOW威胁，2=MEDIUM预警，3=HIGH正式告警。 */
     int event_stage = 0;
-    /** score/direct_entry/optic/alarm_area_dwell。 */
+    /** score/direct_entry/optic/alarm_area_dwell/archive_visit。 */
     QString escalation_reason;
     /** A/B、资格、入区、几何和硬条件证据的紧凑 JSON。 */
     QString escalation_evidence;

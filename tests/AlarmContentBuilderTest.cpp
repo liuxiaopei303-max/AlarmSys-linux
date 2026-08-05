@@ -49,6 +49,48 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    AreaEscalationEvaluator::Result archiveResult;
+    archiveResult.targetId = 413312551;
+    archiveResult.domain = AreaEscalationEvaluator::TargetDomain::Surface;
+    archiveResult.stage = AreaEscalationEvaluator::Stage::Alarm;
+    archiveResult.disposition = AreaEscalationEvaluator::Disposition::VerifySuccess;
+    archiveResult.reason = QStringLiteral("archive_visit");
+    archiveResult.conditionId = QStringLiteral("rule-B");
+    archiveResult.eventArea = {3, 15};
+    archiveResult.score = 90;
+    archiveResult.archiveTargetLabel = QStringLiteral("知识库威胁船A");
+    archiveResult.currentPosition = QPointF(37.55, 122.10);
+
+    const QJsonDocument archiveDocument = QJsonDocument::fromJson(
+        buildAreaEscalationContent(archiveResult).toUtf8(), &error);
+    if (error.error != QJsonParseError::NoError || !archiveDocument.isObject()) {
+        qCritical() << "archive alarm content is not valid JSON" << error.errorString();
+        return 1;
+    }
+    const QJsonObject archiveObject = archiveDocument.object();
+    const QString archiveSummary = archiveObject.value(QStringLiteral("summary")).toString();
+    if (archiveSummary
+            != QStringLiteral("目标 413312551（知识库威胁船A）为知识库中的威胁目标，直接告警")
+        || archiveObject.value(QStringLiteral("upgrade_reason")).toString()
+            != QStringLiteral("archive_visit")
+        || archiveObject.value(QStringLiteral("archive_status")).toBool() != true
+        || archiveObject.value(QStringLiteral("archive_target_type")).toString()
+            != QStringLiteral("知识库威胁船A")
+        || archiveObject.value(QStringLiteral("disposition")).toString()
+            != QStringLiteral("VERIFY_SUCCESS")) {
+        qCritical().noquote() << "archive evidence contract failed:" << archiveObject;
+        return 1;
+    }
+
+    archiveResult.archiveTargetLabel.clear();
+    const QJsonObject unnamedArchiveObject = QJsonDocument::fromJson(
+        buildAreaEscalationContent(archiveResult).toUtf8()).object();
+    if (unnamedArchiveObject.value(QStringLiteral("summary")).toString()
+        != QStringLiteral("目标 413312551 为知识库中的威胁目标，直接告警")) {
+        qCritical() << "archive fallback summary failed" << unnamedArchiveObject;
+        return 1;
+    }
+
     qInfo() << "Alarm content builder test passed";
     return 0;
 }

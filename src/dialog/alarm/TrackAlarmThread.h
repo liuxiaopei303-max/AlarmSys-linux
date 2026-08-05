@@ -31,7 +31,8 @@ private:
     bool isTrackInGroupArea(QPointF pt);
     bool isTrackInGroupAreaByGroupId(QPointF pt, int groupId);
     bool isTrackInOtherAlarmArea(QPolygonF polyNow, QPointF pt, QList< AlarmRule> waringList,int index);
-    void SaveToDB(AlarmRule info, qint64 targetId, float lat, float lon, float speed, float dir, float dis, int TargetType, int threatScore, int timestampSec, int radarSourceId = 0, const QString& alarmContent = QString(), int eventStage = 3);
+    void SaveToDB(AlarmRule info, qint64 targetId, float lat, float lon, float speed, float dir, float dis, int TargetType, int threatScore, int timestampSec, int radarSourceId = 0, const QString& alarmContent = QString(), int eventStage = 3, int taskStatus = 0, const QString& escalationReason = QString());
+    DataAccessLayer::DetectionTypeResult cognitiveEvidenceForUniqueId(qint64 uniqueId);
     int convertTargetTypeStringToBitmask(const QString& targetType);
     double calculateThreatLevel(const SPxPacketTrackExtended& track, const DataAccessLayer::DetectionTypeResult& detectionResult, const ThreatAssessmentParams& threatParams, bool hasProtectArea = false, const QPointF& protectCenter = QPointF(), double entryAngle = 0.0);
     ThreatAssessmentResult calculateThreatAssessment(const SPxPacketTrackExtended& track, const DataAccessLayer::DetectionTypeResult& detectionResult, const ThreatAssessmentParams& threatParams, bool hasProtectArea = false, const QPointF& protectCenter = QPointF(), double entryAngle = 0.0);
@@ -76,6 +77,8 @@ private:
     QList<AreaEscalationBinding> m_areaEscalationBindings;
     QSet<QString> m_areaEscalationClaimedConditionIds;
     QHash<QString, bool> m_areaEscalationPreviousSpeed;
+    /** 单处理周期认知结果缓存；避免同一目标因多区域/多规则重复点查数据库。 */
+    QHash<qint64, DataAccessLayer::DetectionTypeResult> m_cognitiveEvidenceCache;
 signals:
 
     void newAlarmDetected(QString);

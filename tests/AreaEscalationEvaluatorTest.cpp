@@ -242,6 +242,66 @@ void dwellOpticAndLifecycleTests()
     CHECK("27. 方案重载清状态", one(e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 100)).stage == Evaluator::Stage::Prewarning);
 }
 
+void archiveVisitTests()
+{
+    Evaluator e;
+    e.reset(pair());
+
+    auto archivedInB = target(QPointF(9, 1), 0, 0);
+    archivedInB.suppressNewEvent = true; // 知识库威胁目标绕过免告警区
+    archivedInB.alarm.archiveVisitMatched = true;
+    archivedInB.alarm.archiveTargetLabel = QStringLiteral("知识库船A");
+    archivedInB.alarm.archiveThreatScore = 90;
+    archivedInB.alarm.hard.speed = false;
+    archivedInB.alarm.hard.speedDoubleCheck = false;
+    archivedInB.alarm.hard.height = false;
+    archivedInB.alarm.hard.entryAngle = false;
+    archivedInB.alarm.hard.targetType = false;
+    archivedInB.alarm.hard.targetAttributes = false;
+    archivedInB.alarm.hard.protectDistance = false;
+    archivedInB.alarm.hard.entryTime = false;
+    archivedInB.alarm.hard.failure = QStringLiteral("all_regular_conditions_failed");
+    const auto archivedResult = one(e.evaluateCycle({archivedInB}, 1000));
+    CHECK("37. B区在库目标绕过所有普通条件直接HIGH",
+          archivedResult.stage == Evaluator::Stage::Alarm
+              && archivedResult.reason == QStringLiteral("archive_visit")
+              && archivedResult.disposition == Evaluator::Disposition::VerifySuccess
+              && archivedResult.score == 90
+              && archivedResult.archiveTargetLabel == QStringLiteral("知识库船A"));
+
+    e.reset(pair());
+    auto archivedInA = target(QPointF(1, 1), 0, 0);
+    archivedInA.warning.archiveVisitMatched = true;
+    archivedInA.warning.archiveTargetLabel = QStringLiteral("知识库船A");
+    CHECK("37. A区在库目标不直接告警", e.evaluateCycle({archivedInA}, 1000).isEmpty());
+
+    e.reset(pair());
+    auto notArchivedInB = target(QPointF(9, 1), 0, 0);
+    notArchivedInB.alarm.archiveVisitMatched = false;
+    CHECK("37. archive_status非true不触发", e.evaluateCycle({notArchivedInB}, 1000).isEmpty());
+
+    auto airPolicy = pair();
+    Evaluator::RulePair air;
+    air.laneId = QStringLiteral("air-rule");
+    air.domain = Evaluator::TargetDomain::Air;
+    air.trackType = 3;
+    air.threatThreshold = 20;
+    air.prewarningThreshold = 60;
+    air.warningRuleId = QStringLiteral("rule-A");
+    air.alarmRuleId = QStringLiteral("rule-B");
+    airPolicy.rulePairs = {air};
+    e.reset(airPolicy);
+    auto archivedAir = target(QPointF(9, 1), 20, 20);
+    archivedAir.domain = Evaluator::TargetDomain::Air;
+    archivedAir.laneId = air.laneId;
+    archivedAir.alarm.archiveVisitMatched = true;
+    archivedAir.alarm.archiveTargetLabel = QStringLiteral("不应应用到空中目标");
+    const auto airResult = one(e.evaluateCycle({archivedAir}, 1000));
+    CHECK("37. 对空目标不走知识库船只直告",
+          airResult.stage == Evaluator::Stage::Threat
+              && airResult.reason == QStringLiteral("score"));
+}
+
 void configurationAndOutputTests()
 {
     Evaluator e;
@@ -474,6 +534,7 @@ int main(int argc, char** argv)
     domainIsolationTests();
     schemeRoundTripTests();
     multiAreaAnyToAnyTests();
+    archiveVisitTests();
     qInfo() << "AreaEscalationEvaluator tests completed, failures=" << failures;
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -261,7 +261,7 @@ void TrackAlarmThread::run()
 	}
 }
 
-void TrackAlarmThread::SaveToDB(AlarmRule info, qint64 targetId, float lat, float lon, float speed, float dir, float dis, int TargetType, int threatScore, int timestampSec, int radarSourceId, const QString& alarmContent, int eventStage)
+void TrackAlarmThread::SaveToDB(AlarmRule info, qint64 targetId, float lat, float lon, float speed, float dir, float dis, int TargetType, int threatScore, int timestampSec, int radarSourceId, const QString& alarmContent, int eventStage, int taskStatus, const QString& escalationReason)
 {
 	if (targetId <= 0) {
 		logAlarmTrace(QStringLiteral("SaveToDB skip invalid target_id------targetId:%1 conditionId:%2")
@@ -379,7 +379,11 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, qint64 targetId, float lat, floa
 		newAlarm.alarm_status = 0;
 		// 旧规则路径调用默认值 3，代表已形成正式告警；三态路径显式传入真实阶段。
 		newAlarm.event_stage = eventStage;
+		newAlarm.task_status = taskStatus;
 		newAlarm.alarm_content = alarmContent;
+		newAlarm.escalation_reason = escalationReason;
+		if (!escalationReason.isEmpty())
+			newAlarm.escalation_evidence = alarmContent;
 		newAlarm.threat_time_ms = al.originTimeFromTrackMsg
 			? (al.originTrackTimeIsMs ? static_cast<qint64>(timestampSec)
 						  : static_cast<qint64>(timestampSec) * 1000LL)
@@ -414,6 +418,7 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, qint64 targetId, float lat, floa
 			sendAlarm.alarm_count += 1;
 			sendAlarm.threatScore = threatScore;
 			sendAlarm.event_stage = qMax(sendAlarm.event_stage, eventStage);
+			sendAlarm.task_status = qMax(sendAlarm.task_status, taskStatus);
 			sendAlarm.unique_id = targetId;
 			sendAlarm.track_id = 0;
 			if (radarSourceId != 0)
@@ -422,6 +427,10 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, qint64 targetId, float lat, floa
 			sendAlarm.area_id = info.area_id;
 			if (!alarmContent.isEmpty()) {
 				sendAlarm.alarm_content = alarmContent;
+			}
+			if (!escalationReason.isEmpty()) {
+				sendAlarm.escalation_reason = escalationReason;
+				sendAlarm.escalation_evidence = alarmContent;
 			}
 			sendAlarm.time = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz");
 			if (gConfig->m_struBasicConfig.m_nUseBasePoint == 1)
@@ -488,6 +497,21 @@ void TrackAlarmThread::SaveToDB(AlarmRule info, qint64 targetId, float lat, floa
 		}
 	}
 }
+
+DataAccessLayer::DetectionTypeResult TrackAlarmThread::cognitiveEvidenceForUniqueId(
+	qint64 uniqueId)
+{
+	if (uniqueId <= 0)
+		return DataAccessLayer::DetectionTypeResult();
+	const auto cached = m_cognitiveEvidenceCache.constFind(uniqueId);
+	if (cached != m_cognitiveEvidenceCache.constEnd())
+		return cached.value();
+	const DataAccessLayer::DetectionTypeResult result =
+		gConfig->dbHelper.getDetectionTypesByReId(uniqueId);
+	m_cognitiveEvidenceCache.insert(uniqueId, result);
+	return result;
+}
+
 bool TrackAlarmThread::isTrackInGroupArea(QPointF pt)
 {
 	bool isInGroup = false;
@@ -780,12 +804,62 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 				}
 			}
 
+			const qint64 targetId = candidateTrackId;
+			const qint64 cognitiveUniqueId = track.secondary.uniqueID > 0
+				? static_cast<qint64>(track.secondary.uniqueID) : targetId;
+
+			// 对海知识库命中是最高优先级的业务告警证据：当前规则的区域候选已经
+			// 在调用本函数前形成，命中后只保留 SaveToDB 内的人工删除过滤。
+			if (type == 0) {
+				const DataAccessLayer::DetectionTypeResult cognitive =
+					cognitiveEvidenceForUniqueId(cognitiveUniqueId);
+				if (cognitive.archiveVisit.matched) {
+					AreaEscalationEvaluator::Result archiveResult;
+					archiveResult.targetId = targetId;
+					archiveResult.domain = AreaEscalationEvaluator::TargetDomain::Surface;
+					archiveResult.laneId = QStringLiteral("legacy");
+					archiveResult.trackType = info.track_type;
+					archiveResult.stage = AreaEscalationEvaluator::Stage::Alarm;
+					archiveResult.disposition =
+						AreaEscalationEvaluator::Disposition::VerifySuccess;
+					archiveResult.reason = QStringLiteral("archive_visit");
+					archiveResult.conditionId = info.condition_id;
+					archiveResult.eventArea = {info.group_id, info.area_id};
+					archiveResult.score = qBound(0, al.defaultThreatScore, 100);
+					archiveResult.insideAlarm = true;
+					archiveResult.currentPosition = QPointF(track.latDegs, track.longDegs);
+					archiveResult.courseDeg = track.norm.min.courseDegrees;
+					archiveResult.speedMps = track.norm.min.speedMps;
+					archiveResult.hardConditions = QStringLiteral("archive_visit_bypass");
+					archiveResult.archiveTargetLabel =
+						cognitive.archiveVisit.targetLabel;
+					const QString archiveContent =
+						buildAreaEscalationContent(archiveResult);
+					logAlarmTrace(QStringLiteral(
+						"updataAlarmTrackToDB pass------targetId:%1 path:archive_visit "
+						"cognitiveUniqueId:%2 archiveTarget:%3 area:%4/%5 "
+						"speed:%6 course:%7 bypass:all_regular_filters conditionId:%8")
+						.arg(targetId).arg(cognitiveUniqueId)
+						.arg(cognitive.archiveVisit.targetLabel)
+						.arg(info.group_id).arg(info.area_id)
+						.arg(track.norm.min.speedMps, 0, 'f', 2)
+						.arg(track.norm.min.courseDegrees, 0, 'f', 2)
+						.arg(info.condition_id));
+					SaveToDB(info, targetId, track.latDegs, track.longDegs,
+						track.norm.min.speedMps, track.norm.min.courseDegrees,
+						track.norm.min.rangeMetres, type, archiveResult.score,
+						static_cast<int>(track.msgTimeSecs), radarSourceId,
+						archiveContent, static_cast<int>(archiveResult.stage), 3,
+						archiveResult.reason);
+					continue;
+				}
+			}
+
 			// 告警规则判断逻辑：优先处理黑白名单，然后进行其他条件过滤
 			bool passFilter = true;
 			bool blacklistAlarm = false; // 黑名单直接告警标志
 			bool whitelistSkip = false;  // 白名单直接忽略标志
 			QString failReason;
-			const qint64 targetId = candidateTrackId;
 			float height = track.altitudeMetres;
 			const int filterLookupKey =
 				(targetId > 0 && targetId <= static_cast<qint64>(std::numeric_limits<int>::max()))
@@ -1205,8 +1279,9 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 					{
 
 						// 使用track.secondary.uniqueID作为reid来查询认知结果
-						qint64 uniqueId = track.secondary.uniqueID;
-						DataAccessLayer::DetectionTypeResult detectionResult = gConfig->dbHelper.getDetectionTypesByReId(uniqueId);
+						const qint64 uniqueId = cognitiveUniqueId;
+						DataAccessLayer::DetectionTypeResult detectionResult =
+							cognitiveEvidenceForUniqueId(uniqueId);
 
 						if (!detectionResult.found) {
 							// 对海：无认知结果则不通过；对空(type==3)：放行，仍计算威胁度
@@ -1328,7 +1403,7 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 						const qint64 detectionKey =
 							track.secondary.uniqueID > 0 ? track.secondary.uniqueID : targetId;
 						DataAccessLayer::DetectionTypeResult detectionForContent =
-							gConfig->dbHelper.getDetectionTypesByReId(detectionKey);
+							cognitiveEvidenceForUniqueId(detectionKey);
 						const bool hasDetectionForContent = detectionForContent.found;
 						QString triggerPath = QStringLiteral("rule_match");
 						if (info.threat_level1 > 0
@@ -1696,6 +1771,12 @@ AreaEscalationEvaluator::AreaEvidence TrackAlarmThread::evaluateAreaEscalationEv
 	evidence.conditionId = rule.condition_id;
 	if (!insideArea)
 		return evidence;
+	if (rule.track_type == 0 && detection.archiveVisit.matched) {
+		evidence.archiveVisitMatched = true;
+		evidence.archiveTargetLabel = detection.archiveVisit.targetLabel;
+		evidence.archiveThreatScore = qBound(
+			0, gConfig->m_alarmLogic.defaultThreatScore, 100);
+	}
 
 	QStringList failures;
 	auto reject = [&](bool* field, const QString& reason) {
@@ -1886,7 +1967,8 @@ void TrackAlarmThread::processAreaEscalation()
 			const qint64 detectionId = track.secondary.uniqueID > 0
 				? static_cast<qint64>(track.secondary.uniqueID) : targetId;
 			if (insideArea && !detectionCache.contains(targetKey))
-				detectionCache.insert(targetKey, gConfig->dbHelper.getDetectionTypesByReId(detectionId));
+				detectionCache.insert(
+					targetKey, cognitiveEvidenceForUniqueId(detectionId));
 			const DataAccessLayer::DetectionTypeResult detection = detectionCache.value(targetKey);
 
 			AreaEscalationEvaluator::AreaObservation observation;
@@ -2016,65 +2098,72 @@ void TrackAlarmThread::applyAreaEscalationResult(
 	QString content;
 
 	if (result.stageChanged) {
-		const DataAccessLayer::DetectionTypeResult detection =
-			gConfig->dbHelper.getDetectionTypesByReId(result.targetId);
-		// 双样本速度锁存的第二个样本只确认速度；正文与评分应按升级模块
-		// 返回的触发证据位置/航向构造，不能用第二样本覆盖入区证据。
-		SPxPacketTrackExtended evidenceTrack = track;
-		evidenceTrack.latDegs = result.currentPosition.x();
-		evidenceTrack.longDegs = result.currentPosition.y();
-		evidenceTrack.norm.min.courseDegrees = result.courseDeg;
-		evidenceTrack.norm.min.speedMps = result.speedMps;
-		const AreaEscalationProtectionResolver::Context protection =
-			resolveProtectionContext(rule, result.domain);
-		const bool hasProtectArea = protection.available;
-		const QPointF protectCenter = protection.center;
+		if (result.reason == QLatin1String("archive_visit")) {
+			// 知识库命中不再生成速度/航向/评分规则文案；证据由升级模块确定性组装。
+			content = buildAreaEscalationContent(result);
+		} else {
+			const DataAccessLayer::DetectionTypeResult detection =
+				cognitiveEvidenceForUniqueId(result.targetId);
+			// 双样本速度锁存的第二个样本只确认速度；正文与评分应按升级模块
+			// 返回的触发证据位置/航向构造，不能用第二样本覆盖入区证据。
+			SPxPacketTrackExtended evidenceTrack = track;
+			evidenceTrack.latDegs = result.currentPosition.x();
+			evidenceTrack.longDegs = result.currentPosition.y();
+			evidenceTrack.norm.min.courseDegrees = result.courseDeg;
+			evidenceTrack.norm.min.speedMps = result.speedMps;
+			const AreaEscalationProtectionResolver::Context protection =
+				resolveProtectionContext(rule, result.domain);
+			const bool hasProtectArea = protection.available;
+			const QPointF protectCenter = protection.center;
 
-		double attackAngle = evidenceTrack.norm.min.courseDegrees;
-		if (hasProtectArea) {
-			const double bearingToCenter = AreaEscalationProtectionResolver::bearingDegrees(
-				QPointF(evidenceTrack.latDegs, evidenceTrack.longDegs), protectCenter);
-			attackAngle = AreaEscalationProtectionResolver::attackAngleDegrees(
-				evidenceTrack.norm.min.courseDegrees, bearingToCenter);
-		}
-
-		ThreatAssessmentParams threatParams(rule.group_id, rule.area_id);
-		for (const ThreatAssessmentParams& params : gConfig->m_listThreatAssessmentParams) {
-			if (params.groupId == rule.group_id && params.areaId == rule.area_id) {
-				threatParams = params;
-				break;
+			double attackAngle = evidenceTrack.norm.min.courseDegrees;
+			if (hasProtectArea) {
+				const double bearingToCenter = AreaEscalationProtectionResolver::bearingDegrees(
+					QPointF(evidenceTrack.latDegs, evidenceTrack.longDegs), protectCenter);
+				attackAngle = AreaEscalationProtectionResolver::attackAngleDegrees(
+					evidenceTrack.norm.min.courseDegrees, bearingToCenter);
 			}
+
+			ThreatAssessmentParams threatParams(rule.group_id, rule.area_id);
+			for (const ThreatAssessmentParams& params : gConfig->m_listThreatAssessmentParams) {
+				if (params.groupId == rule.group_id && params.areaId == rule.area_id) {
+					threatParams = params;
+					break;
+				}
+			}
+			const ThreatAssessmentResult assessment = calculateThreatAssessment(
+				evidenceTrack, detection, threatParams, hasProtectArea, protectCenter, attackAngle);
+			AlarmContentBuildInput readableInput;
+			readableInput.rule = &rule;
+			readableInput.cfg = gConfig;
+			readableInput.uniqueId = result.targetId;
+			readableInput.speedMps = evidenceTrack.norm.min.speedMps;
+			readableInput.courseDeg = evidenceTrack.norm.min.courseDegrees;
+			readableInput.attackAngleDeg = attackAngle;
+			readableInput.heightM = evidenceTrack.altitudeMetres;
+			readableInput.threatScore = result.score;
+			readableInput.hasProtectArea = hasProtectArea;
+			readableInput.protectionReferenceSource = protection.sourceName();
+			readableInput.protectionReferenceCenter = protection.center;
+			readableInput.protectionReferenceRadiusM = protection.radiusMeters;
+			readableInput.isAirTrack = isAir;
+			readableInput.hasThreatBreakdown = true;
+			readableInput.threatBreakdown = assessment;
+			readableInput.triggerPath = result.reason == QLatin1String("direct_entry")
+				? QStringLiteral("threat_direct") : QStringLiteral("rule_match");
+			readableInput.detection = detection;
+			readableInput.hasDetection = detection.found;
+			const QString readableRuleContent = buildRuleAlarmContent(readableInput);
+			content = buildAreaEscalationContent(result, readableRuleContent);
 		}
-		const ThreatAssessmentResult assessment = calculateThreatAssessment(
-			evidenceTrack, detection, threatParams, hasProtectArea, protectCenter, attackAngle);
-		AlarmContentBuildInput readableInput;
-		readableInput.rule = &rule;
-		readableInput.cfg = gConfig;
-		readableInput.uniqueId = result.targetId;
-		readableInput.speedMps = evidenceTrack.norm.min.speedMps;
-		readableInput.courseDeg = evidenceTrack.norm.min.courseDegrees;
-		readableInput.attackAngleDeg = attackAngle;
-		readableInput.heightM = evidenceTrack.altitudeMetres;
-		readableInput.threatScore = result.score;
-		readableInput.hasProtectArea = hasProtectArea;
-		readableInput.protectionReferenceSource = protection.sourceName();
-		readableInput.protectionReferenceCenter = protection.center;
-		readableInput.protectionReferenceRadiusM = protection.radiusMeters;
-		readableInput.isAirTrack = isAir;
-		readableInput.hasThreatBreakdown = true;
-		readableInput.threatBreakdown = assessment;
-		readableInput.triggerPath = result.reason == QLatin1String("direct_entry")
-			? QStringLiteral("threat_direct") : QStringLiteral("rule_match");
-		readableInput.detection = detection;
-		readableInput.hasDetection = detection.found;
-		const QString readableRuleContent = buildRuleAlarmContent(readableInput);
-		content = buildAreaEscalationContent(result, readableRuleContent);
 
 		SaveToDB(rule, result.targetId, track.latDegs, track.longDegs,
 			track.norm.min.speedMps, track.norm.min.courseDegrees,
 			track.norm.min.rangeMetres, isAir ? track.norm.min.reserved1 : 0, result.score,
 			static_cast<int>(track.msgTimeSecs), isAir ? 9 : 0, content,
-			static_cast<int>(result.stage));
+			static_cast<int>(result.stage),
+			result.disposition == AreaEscalationEvaluator::Disposition::VerifySuccess ? 3 : 0,
+			result.reason);
 	}
 
 	const QString nowText = QDateTime::currentDateTime().toString(
@@ -2249,6 +2338,7 @@ void TrackAlarmThread::processAlarms()
 		copyTrailForLiveTracks(m_mapBirdRadarTrail, gConfig->m_mapBirdFuseTrail, gConfig->m_mapBirdFuseTrack);
 		m_mapAISTrail = gConfig->m_mapAISTrail;
 	}
+	m_cognitiveEvidenceCache.clear();
 	int trailCount = 2;
 	QList< AlarmRule> waringList = gConfig->m_mapAlarmRule.values();
 	const bool areaEscalationActive = configureAreaEscalation(waringList);

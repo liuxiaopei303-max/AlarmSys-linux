@@ -9,6 +9,7 @@
 #include <QDateTime>
 #include "DatabaseManager.h"
 #include "datastruct/commonStruct.h"
+#include "dialog/alarm/ArchiveVisitEvidence.h"
 
 /*
  *
@@ -219,13 +220,14 @@ public:
         QString camTargetType;    // 相机目标类型 
         QString uavTargetType;    // 无人机目标类型
         int finalThreatLevel;     // 最终威胁度
+        ArchiveVisitEvidence archiveVisit; // 知识库在库/到访证据
         bool found;               // 是否找到数据
 
         DetectionTypeResult() : finalThreatLevel(0), found(false) {}
     };
 
-    // 根据reid获取检测类型信息
-    DetectionTypeResult getDetectionTypesByReId(qint64 reId);
+    // 历史函数名保留兼容；实际按 cognitive_results_comprehensive.unique_id 点查。
+    DetectionTypeResult getDetectionTypesByReId(qint64 uniqueId);
 
     struct CognitiveTypeJudgeRow {
         qint64 uniqueId = 0;

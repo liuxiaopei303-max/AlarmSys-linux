@@ -429,6 +429,8 @@ void AreaEscalationEvaluator::upgrade(
     state->conditionId = evidence.conditionId;
     state->eventArea = area;
     state->score = evidence.score;
+    state->archiveTargetLabel = evidence.archiveVisitMatched
+        ? evidence.archiveTargetLabel.trimmed() : QString();
     if (changed) *changed = true;
 }
 
@@ -599,6 +601,24 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
             if (state.stage != previousStage)
                 transitionHard = evidence.hard.summary();
         };
+
+        // 知识库中的对海威胁目标是独立的直接告警证据。它仍要求当前点位于 B，
+        // 但按产品约定绕过免告警区以及所有普通规则硬条件/评分。
+        if (snapshot.domain == TargetDomain::Surface) {
+            for (const EvaluatedObservation& item : evaluated) {
+                const AreaEvidence& evidence = item.observation.evidence;
+                if (item.observation.role != AreaRole::Alarm
+                    || !item.inside || !evidence.available
+                    || !evidence.archiveVisitMatched) {
+                    continue;
+                }
+                AreaEvidence archiveEvidence = evidence;
+                archiveEvidence.score = qBound(0, evidence.archiveThreatScore, 100);
+                upgradeFrom(Stage::Alarm, Disposition::VerifySuccess,
+                            QStringLiteral("archive_visit"), item, &archiveEvidence);
+                break;
+            }
+        }
 
         if (allowTransitions && scoreItem != nullptr) {
             const AreaEvidence& evidence = scoreItem->observation.evidence;
@@ -788,6 +808,7 @@ AreaEscalationEvaluator::Result AreaEscalationEvaluator::makeResult(
     result.speedMps = snapshot.speedMps;
     result.hardConditions = hard;
     result.entryGeometry = entryGeometry;
+    result.archiveTargetLabel = state.archiveTargetLabel;
     result.stageChanged = stageChanged;
     return result;
 }

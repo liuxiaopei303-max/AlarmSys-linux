@@ -116,6 +116,10 @@ public:
         HardConditions hard;
         QString conditionId;
         bool opticSeen = false;
+        /** 对海知识库 archive_status=true；只在 B 区作为独立 HIGH 证据。 */
+        bool archiveVisitMatched = false;
+        QString archiveTargetLabel;
+        int archiveThreatScore = 90;
     };
 
     /** 一个区域在本处理周期的规则证据；区域角色和阈值均来自启用方案。 */
@@ -172,6 +176,7 @@ public:
         double speedMps = 0.0;
         QString hardConditions;
         QString entryGeometry;
+        QString archiveTargetLabel;
         bool stageChanged = false;
     };
 
@@ -238,6 +243,7 @@ private:
         qint64 qualificationTimeMs = 0;
         quint64 qualificationCycle = 0;
         AreaKey qualificationArea;
+        QString archiveTargetLabel;
         bool seen = false;
         QPointF previousPosition;
         bool hasPreviousPosition = false;

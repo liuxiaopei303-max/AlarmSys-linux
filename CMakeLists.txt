@@ -39,6 +39,7 @@ set(ALARM_SOURCES
     "${ALARM_SRC_DIR}/customconfig.cpp"
     "${ALARM_SRC_DIR}/common/commonfunc.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AlarmAreaGeometryParser.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/ArchiveVisitEvidence.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/TrackAlarmThread.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationEvaluator.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationProtectionResolver.cpp"
@@ -194,6 +195,18 @@ set_target_properties(alarm_area_geometry_parser_test PROPERTIES
     AUTOMOC OFF
 )
 add_test(NAME alarm_area_geometry_parser_test COMMAND alarm_area_geometry_parser_test)
+
+add_executable(archive_visit_evidence_test
+    "${CMAKE_SOURCE_DIR}/tests/ArchiveVisitEvidenceTest.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/ArchiveVisitEvidence.cpp"
+)
+target_include_directories(archive_visit_evidence_test PRIVATE "${ALARM_SRC_DIR}")
+target_link_libraries(archive_visit_evidence_test PRIVATE Qt5::Core)
+set_target_properties(archive_visit_evidence_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    AUTOMOC OFF
+)
+add_test(NAME archive_visit_evidence_test COMMAND archive_visit_evidence_test)
 
 add_executable(alarm_grpc_snapshot_mapping_test
     "${CMAKE_SOURCE_DIR}/tests/AlarmGrpcSnapshotMappingTest.cpp"

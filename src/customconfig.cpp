@@ -1207,14 +1207,15 @@ AlarmEffectiveDisposition CustomConfig::resolveRuleAlarmDisposition(const AlarmD
 {
     AlarmEffectiveDisposition out;
     // 三态升级的处置口径由升级原因决定，不能再被识别规则事后覆盖：
-    // 持资格直接入 B 为 UNASSIGNED；光电/连续 7 秒为 VERIFY_SUCCESS。
+    // 持资格直接入 B 为 UNASSIGNED；光电/连续 7 秒/知识库命中为 VERIFY_SUCCESS。
     if (alarmData.event_stage == 3) {
         if (alarmData.escalation_reason == QLatin1String("direct_entry")) {
             out.task_status = 0;
             return out;
         }
         if (alarmData.escalation_reason == QLatin1String("optic")
-            || alarmData.escalation_reason == QLatin1String("alarm_area_dwell")) {
+            || alarmData.escalation_reason == QLatin1String("alarm_area_dwell")
+            || alarmData.escalation_reason == QLatin1String("archive_visit")) {
             out.task_status = 3;
             return out;
         }

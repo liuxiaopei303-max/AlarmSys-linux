@@ -2091,19 +2091,24 @@ QString DataAccessLayer::getTargetType(int id)
     }
     return "";
 }
-DataAccessLayer::DetectionTypeResult DataAccessLayer::getDetectionTypesByReId(qint64 reId)
+DataAccessLayer::DetectionTypeResult DataAccessLayer::getDetectionTypesByReId(qint64 uniqueId)
 {
     DetectionTypeResult result;
-    QString query = "SELECT final_target_type, llm_target_type, cam_target_type, uav_target_type, final_threat_level "
+    const QString query =
+        "SELECT final_target_type, llm_target_type, cam_target_type, uav_target_type, "
+        "final_threat_level, archive_target_type, archive_status "
         "FROM cognitive_results_comprehensive WHERE unique_id = ? "
-        "ORDER BY observed_at DESC LIMIT 1"; // 获取最新的一条记录
-    QSqlQuery sqlResult = m_dbManager.executeQuery(query, { reId });
+        "LIMIT 1";
+    QSqlQuery sqlResult = m_dbManager.executeQuery(query, { uniqueId });
     if (sqlResult.next()) {
         result.finalTargetType = sqlResult.value("final_target_type").toString();
         result.llmTargetType = sqlResult.value("llm_target_type").toString();
         result.camTargetType = sqlResult.value("cam_target_type").toString();
         result.uavTargetType = sqlResult.value("uav_target_type").toString();
         result.finalThreatLevel = sqlResult.value("final_threat_level").toInt();
+        result.archiveVisit = ArchiveVisitEvidence::fromDatabase(
+            sqlResult.value("archive_status").toString(),
+            sqlResult.value("archive_target_type").toString());
         result.found = true;
     }
     return result;

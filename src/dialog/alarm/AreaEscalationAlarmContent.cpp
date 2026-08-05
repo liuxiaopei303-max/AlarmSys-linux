@@ -29,6 +29,7 @@ QString buildAreaEscalationContent(
     const AreaEscalationEvaluator::Result& result,
     const QString& readableRuleContent)
 {
+    const bool archiveVisit = result.reason == QLatin1String("archive_visit");
     const auto timeText = [](qint64 ms) {
         return ms > 0
             ? QDateTime::fromMSecsSinceEpoch(ms).toString(
@@ -43,14 +44,21 @@ QString buildAreaEscalationContent(
     };
 
     QJsonObject object;
-    if (!readableRuleContent.trimmed().isEmpty()) {
+    if (!archiveVisit && !readableRuleContent.trimmed().isEmpty()) {
         QJsonParseError error;
         const QJsonDocument readableDocument =
             QJsonDocument::fromJson(readableRuleContent.toUtf8(), &error);
         if (error.error == QJsonParseError::NoError && readableDocument.isObject())
             object = readableDocument.object();
     }
-    if (object.value(QStringLiteral("summary")).toString().trimmed().isEmpty()) {
+    if (archiveVisit) {
+        const QString archiveLabel = result.archiveTargetLabel.trimmed();
+        const QString summary = archiveLabel.isEmpty()
+            ? QStringLiteral("目标 %1 为知识库中的威胁目标，直接告警").arg(result.targetId)
+            : QStringLiteral("目标 %1（%2）为知识库中的威胁目标，直接告警")
+                  .arg(result.targetId).arg(archiveLabel);
+        object.insert(QStringLiteral("summary"), summary);
+    } else if (object.value(QStringLiteral("summary")).toString().trimmed().isEmpty()) {
         object.insert(
             QStringLiteral("summary"),
             QStringLiteral("目标 %1 当前阶段 %2，升级原因 %3")
@@ -102,6 +110,11 @@ QString buildAreaEscalationContent(
     object.insert(QStringLiteral("speed_mps"), result.speedMps);
     object.insert(QStringLiteral("hard_conditions"), result.hardConditions);
     object.insert(QStringLiteral("entry_geometry"), result.entryGeometry);
+    if (archiveVisit) {
+        object.insert(QStringLiteral("archive_status"), true);
+        object.insert(
+            QStringLiteral("archive_target_type"), result.archiveTargetLabel.trimmed());
+    }
     object.insert(QStringLiteral("current_position"), pointJson(result.currentPosition));
     if (result.hasPreviousPosition)
         object.insert(QStringLiteral("previous_position"), pointJson(result.previousPosition));
