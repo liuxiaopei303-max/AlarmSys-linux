@@ -183,10 +183,11 @@ struct BasicConfig
     QString m_strNewTrackStructGrpcAddr = QStringLiteral("192.168.18.141:60055");
     /**
      * gRPC 统一出口内允许进入 AlarmSys 的虚兵来源。
-     * 默认只接正常 NewTrackStruct 虚兵链路，拒绝旧 DDS→SPx 桥接来源。
+     * 默认接收正常 NewTrackStruct 与统一融合虚兵链路，拒绝旧 DDS→SPx 桥接来源。
      */
     QStringList m_virtualTrackSourceAllowList = {
-        QStringLiteral("virtual_new_track_struct_grpc_client")
+        QStringLiteral("virtual_new_track_struct_grpc_client"),
+        QStringLiteral("dui_kong_rong_he")
     };
     /**
      * 远遥等原始航迹：dds | grpc

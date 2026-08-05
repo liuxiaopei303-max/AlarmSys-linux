@@ -2023,7 +2023,7 @@ void CustomConfig::LoadConfig()
         {
             const QVariant configured = settings.value(
                 QStringLiteral("Basic/VirtualTrackSourceAllowList"),
-                QStringLiteral("virtual_new_track_struct_grpc_client"));
+                QStringLiteral("virtual_new_track_struct_grpc_client,dui_kong_rong_he"));
             QStringList values = configured.canConvert<QStringList>()
                 ? configured.toStringList()
                 : configured.toString().split(',', QString::SkipEmptyParts);
@@ -2038,6 +2038,8 @@ void CustomConfig::LoadConfig()
             if (m_struBasicConfig.m_virtualTrackSourceAllowList.isEmpty()) {
                 m_struBasicConfig.m_virtualTrackSourceAllowList.append(
                     QStringLiteral("virtual_new_track_struct_grpc_client"));
+                m_struBasicConfig.m_virtualTrackSourceAllowList.append(
+                    QStringLiteral("dui_kong_rong_he"));
             }
         }
         const QString radarTx = settings

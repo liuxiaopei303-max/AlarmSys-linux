@@ -232,6 +232,7 @@ target_include_directories(new_track_struct_routing_test PRIVATE
 )
 target_link_libraries(new_track_struct_routing_test PRIVATE
     Qt5::Core
+    Qt5::Gui
     ${PROTOBUF_LIB}
     ${ABSL_SYNC_LIB}
     ${ABSL_STRINGS_LIB}
