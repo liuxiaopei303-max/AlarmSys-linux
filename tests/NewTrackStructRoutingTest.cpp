@@ -134,6 +134,78 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    proto::TargetObject realSurfaceConfirmed;
+    realSurfaceConfirmed.set_reality_type(proto::RealityType_REAL);
+    realSurfaceConfirmed.set_state(proto::TargetState_LOST);
+    realSurfaceConfirmed.mutable_target_board()->set_entity_id("dui_hai_rong_he");
+    const auto realSurfaceLifecycle =
+        NewTrackStructGrpcConvert::decideTargetLifecycle(realSurfaceConfirmed);
+    if (realSurfaceLifecycle.shouldRemove()
+        || !realSurfaceLifecycle.usedLegacyConfirmedCompatibility()) {
+        qCritical() << "real unified surface state 2 was not treated as legacy CONFIRMED"
+                    << realSurfaceLifecycle.sourceId << realSurfaceLifecycle.reason;
+        return 1;
+    }
+
+    proto::TargetObject realAirConfirmed;
+    realAirConfirmed.set_reality_type(proto::RealityType_REAL);
+    realAirConfirmed.set_state(proto::TargetState_LOST);
+    realAirConfirmed.mutable_target_board()->set_entity_id("dui_kong_rong_he");
+    const auto realAirLifecycle =
+        NewTrackStructGrpcConvert::decideTargetLifecycle(realAirConfirmed);
+    if (realAirLifecycle.shouldRemove()
+        || !realAirLifecycle.usedLegacyConfirmedCompatibility()) {
+        qCritical() << "real unified air state 2 was not treated as legacy CONFIRMED"
+                    << realAirLifecycle.sourceId << realAirLifecycle.reason;
+        return 1;
+    }
+
+    proto::TargetObject realSurfaceDeleted = realSurfaceConfirmed;
+    realSurfaceDeleted.set_state(proto::TargetState_MERGED);
+    const auto realSurfaceDeletedLifecycle =
+        NewTrackStructGrpcConvert::decideTargetLifecycle(realSurfaceDeleted);
+    if (!realSurfaceDeletedLifecycle.shouldRemove()
+        || realSurfaceDeletedLifecycle.reason != QStringLiteral("state_merged")) {
+        qCritical() << "real unified surface legacy state 3 was not removed"
+                    << realSurfaceDeletedLifecycle.sourceId
+                    << realSurfaceDeletedLifecycle.reason;
+        return 1;
+    }
+
+    proto::TargetObject virtualLost = realAirConfirmed;
+    virtualLost.set_reality_type(proto::RealityType_VIRTUAL);
+    const auto virtualLostLifecycle =
+        NewTrackStructGrpcConvert::decideTargetLifecycle(virtualLost);
+    if (!virtualLostLifecycle.shouldRemove()
+        || virtualLostLifecycle.reason != QStringLiteral("state_lost")) {
+        qCritical() << "virtual state 2 no longer followed protobuf LOST semantics"
+                    << virtualLostLifecycle.sourceId << virtualLostLifecycle.reason;
+        return 1;
+    }
+
+    proto::TargetObject standardRealLost = realSurfaceConfirmed;
+    standardRealLost.mutable_target_board()->set_entity_id("real_track_source");
+    const auto standardRealLostLifecycle =
+        NewTrackStructGrpcConvert::decideTargetLifecycle(standardRealLost);
+    if (!standardRealLostLifecycle.shouldRemove()
+        || standardRealLostLifecycle.reason != QStringLiteral("state_lost")) {
+        qCritical() << "non-unified real source no longer followed protobuf LOST semantics"
+                    << standardRealLostLifecycle.sourceId
+                    << standardRealLostLifecycle.reason;
+        return 1;
+    }
+
+    proto::TargetObject stableReal = realSurfaceConfirmed;
+    stableReal.set_state(proto::TargetState_STABLE);
+    const auto stableRealLifecycle =
+        NewTrackStructGrpcConvert::decideTargetLifecycle(stableReal);
+    if (stableRealLifecycle.shouldRemove()
+        || stableRealLifecycle.reason != QStringLiteral("active_state")) {
+        qCritical() << "stable real target was removed unexpectedly"
+                    << stableRealLifecycle.sourceId << stableRealLifecycle.reason;
+        return 1;
+    }
+
     qInfo() << "NewTrackStruct routing test passed";
     return 0;
 }

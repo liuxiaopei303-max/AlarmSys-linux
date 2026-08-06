@@ -106,7 +106,9 @@ void applyTargetOutputSet(NewTrackStructGrpcClient* client, const TargetOutputSe
     int seaN = 0;
     int airN = 0;
     int skippedDead = 0;
+    int legacyConfirmed = 0;
     int skippedRoute = 0;
+    QString firstLegacyConfirmed;
     QString firstRouteReject;
     for (int i = 0; i < sample.targets_size(); ++i) {
         const TargetObject& t = sample.targets(i);
@@ -114,16 +116,29 @@ void applyTargetOutputSet(NewTrackStructGrpcClient* client, const TargetOutputSe
         if (!NewTrackStructGrpcConvert::parseTargetId(t, &targetId) || targetId <= 0) {
             continue;
         }
-        // LOST/MERGED：从海空两侧同时删除。终态目标可能来自 UNKNOWN 或上游域变更，
+        const NewTrackStructGrpcConvert::TargetLifecycleDecision lifecycle =
+            NewTrackStructGrpcConvert::decideTargetLifecycle(t);
+        // 终态目标从海空两侧同时删除。终态帧可能来自 UNKNOWN 或上游域变更，
         // 不能依赖本帧 environment 决定只清一张表。
-        if (t.state() == trackmanager::grpc::new_track_struct::TargetState_LOST
-            || t.state() == trackmanager::grpc::new_track_struct::TargetState_MERGED) {
+        if (lifecycle.shouldRemove()) {
             cfg->m_mapBirdFuseTrack.remove(targetId);
             cfg->m_mapBirdFuseTrail.remove(targetId);
             cfg->m_mapFuseTrack.remove(targetId);
             cfg->m_mapFuseTrail.remove(targetId);
             ++skippedDead;
             continue;
+        }
+        if (lifecycle.usedLegacyConfirmedCompatibility()) {
+            ++legacyConfirmed;
+            if (firstLegacyConfirmed.isEmpty()) {
+                firstLegacyConfirmed = QStringLiteral(
+                    "target=%1 source=%2 reality=%3 state=%4 reason=%5")
+                    .arg(targetId)
+                    .arg(lifecycle.sourceId)
+                    .arg(static_cast<int>(t.reality_type()))
+                    .arg(static_cast<int>(t.state()))
+                    .arg(lifecycle.reason);
+            }
         }
 
         const NewTrackStructGrpcConvert::TargetRouteDecision route =
@@ -196,12 +211,18 @@ void applyTargetOutputSet(NewTrackStructGrpcClient* client, const TargetOutputSe
 
     static qint64 s_lastLogMs = 0;
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    if ((seaN || airN || skippedDead || skippedRoute) && nowMs - s_lastLogMs >= 5000) {
+    if ((seaN || airN || skippedDead || legacyConfirmed || skippedRoute)
+        && nowMs - s_lastLogMs >= 5000) {
         qInfo() << "[NewTrackStructGrpc] ingest sea=" << seaN << "air=" << airN
                 << "skippedDead=" << skippedDead
+                << "legacyConfirmed=" << legacyConfirmed
                 << "skippedRoute=" << skippedRoute
                 << "fuseMap=" << cfg->m_mapFuseTrack.size()
                 << "birdMap=" << cfg->m_mapBirdFuseTrack.size();
+        if (!firstLegacyConfirmed.isEmpty()) {
+            qInfo().noquote() << QStringLiteral("[NewTrackStructGrpc] lifecycle compatibility %1")
+                .arg(firstLegacyConfirmed);
+        }
         if (!firstRouteReject.isEmpty()) {
             qWarning().noquote() << QStringLiteral("[NewTrackStructGrpc] rejected %1")
                 .arg(firstRouteReject);

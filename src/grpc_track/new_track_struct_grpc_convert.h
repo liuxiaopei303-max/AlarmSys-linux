@@ -32,6 +32,23 @@ struct TargetRouteDecision {
     bool accepted() const { return domain != TargetRouteDomain::Unsupported; }
 };
 
+enum class TargetLifecycleAction {
+    Ingest,
+    Remove,
+};
+
+struct TargetLifecycleDecision {
+    TargetLifecycleAction action = TargetLifecycleAction::Ingest;
+    QString sourceId;
+    QString reason;
+
+    bool shouldRemove() const { return action == TargetLifecycleAction::Remove; }
+    bool usedLegacyConfirmedCompatibility() const
+    {
+        return reason == QStringLiteral("legacy_confirmed_state_2");
+    }
+};
+
 /**
  * 将统一 NewTrackStruct 目标路由到 AlarmSys 的海/空航迹表。
  *
@@ -41,6 +58,15 @@ struct TargetRouteDecision {
 TargetRouteDecision routeTarget(
     const trackmanager::grpc::new_track_struct::TargetObject& target,
     const QStringList& allowedVirtualSourceIds);
+
+/**
+ * 解释统一 NewTrackStruct 目标的生命周期状态。
+ *
+ * 部分真实融合来源沿用旧航迹状态值（1=暂定、2=确认、3=删除），
+ * 其他来源遵循 protobuf TargetState 枚举。
+ */
+TargetLifecycleDecision decideTargetLifecycle(
+    const trackmanager::grpc::new_track_struct::TargetObject& target);
 
 bool parseTargetId(const trackmanager::grpc::new_track_struct::TargetObject& t, qint64* outTargetId);
 

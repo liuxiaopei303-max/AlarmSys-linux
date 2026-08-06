@@ -28,8 +28,11 @@ using trackmanager::grpc::new_track_struct::EnvironmentType_SUBSURFACE;
 using trackmanager::grpc::new_track_struct::EnvironmentType_SURFACE;
 using trackmanager::grpc::new_track_struct::EnvironmentType_UNKNOWN;
 using trackmanager::grpc::new_track_struct::RadarObservedTargetProfile;
+using trackmanager::grpc::new_track_struct::RealityType_REAL;
 using trackmanager::grpc::new_track_struct::RealityType_VIRTUAL;
 using trackmanager::grpc::new_track_struct::TargetObject;
+using trackmanager::grpc::new_track_struct::TargetState_LOST;
+using trackmanager::grpc::new_track_struct::TargetState_MERGED;
 using trackmanager::grpc::new_track_struct::TargetSourceItem;
 using trackmanager::grpc::new_track_struct::ThreatLevel_HIGH;
 using trackmanager::grpc::new_track_struct::ThreatLevel_LOW;
@@ -170,6 +173,33 @@ TargetRouteDecision routeTarget(
     }
 
     decision.reason = QStringLiteral("unsupported_environment");
+    return decision;
+}
+
+TargetLifecycleDecision decideTargetLifecycle(const TargetObject& target)
+{
+    TargetLifecycleDecision decision;
+    decision.sourceId = QString::fromStdString(target.target_board().entity_id()).trimmed();
+
+    if (target.state() == TargetState_LOST) {
+        // 对海/对空真实融合链路仍沿用旧 SPx 航迹状态：2 表示 Confirmed，
+        // 与 protobuf 中 2=LOST 冲突。兼容只收窄到这两个真实来源，避免改变
+        // 虚兵和其他标准 NewTrackStruct 发布者的 LOST 语义。
+        const bool legacyRealFusionSource = target.reality_type() == RealityType_REAL
+            && (decision.sourceId == QStringLiteral("dui_hai_rong_he")
+                || decision.sourceId == QStringLiteral("dui_kong_rong_he"));
+        if (legacyRealFusionSource) {
+            decision.reason = QStringLiteral("legacy_confirmed_state_2");
+            return decision;
+        }
+        decision.action = TargetLifecycleAction::Remove;
+        decision.reason = QStringLiteral("state_lost");
+    } else if (target.state() == TargetState_MERGED) {
+        decision.action = TargetLifecycleAction::Remove;
+        decision.reason = QStringLiteral("state_merged");
+    } else {
+        decision.reason = QStringLiteral("active_state");
+    }
     return decision;
 }
 
