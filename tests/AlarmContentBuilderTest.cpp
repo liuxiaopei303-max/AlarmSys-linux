@@ -49,6 +49,45 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    if (AlarmContentBuilderSupport::applyExplicitTypeFallback(
+            QStringLiteral("unknown"), QStringLiteral("ship"))
+            != QStringLiteral("ship")
+        || AlarmContentBuilderSupport::applyExplicitTypeFallback(
+               QStringLiteral("fishingboat"), QStringLiteral("ship"))
+            != QStringLiteral("fishingboat")) {
+        qCritical() << "explicit unified surface ship content fallback is not narrow";
+        return 1;
+    }
+
+    result.reason = QStringLiteral("alarm_area_dwell");
+    const QString dwellSummary = QJsonDocument::fromJson(
+        buildAreaEscalationContent(result, readableRuleContent).toUtf8())
+        .object().value(QStringLiteral("summary")).toString();
+    if (!dwellSummary.contains(QStringLiteral("分数和硬条件连续达标"))) {
+        qCritical().noquote() << "continuous qualification summary missing:" << dwellSummary;
+        return 1;
+    }
+
+    result.reason = QStringLiteral("optic");
+    const QString opticSummary = QJsonDocument::fromJson(
+        buildAreaEscalationContent(result, readableRuleContent).toUtf8())
+        .object().value(QStringLiteral("summary")).toString();
+    if (!opticSummary.contains(QStringLiteral("达到预警分且已有光电取证"))) {
+        qCritical().noquote() << "optic threshold summary missing:" << opticSummary;
+        return 1;
+    }
+
+    result.domain = AreaEscalationEvaluator::TargetDomain::Air;
+    const QString airOpticSummary = QJsonDocument::fromJson(
+        buildAreaEscalationContent(result, readableRuleContent).toUtf8())
+        .object().value(QStringLiteral("summary")).toString();
+    if (!airOpticSummary.contains(QStringLiteral("告警区内已有光电取证"))
+        || airOpticSummary.contains(QStringLiteral("达到预警分"))) {
+        qCritical().noquote() << "air optic policy summary changed unexpectedly:"
+                             << airOpticSummary;
+        return 1;
+    }
+
     AreaEscalationEvaluator::Result archiveResult;
     archiveResult.targetId = 413312551;
     archiveResult.domain = AreaEscalationEvaluator::TargetDomain::Surface;

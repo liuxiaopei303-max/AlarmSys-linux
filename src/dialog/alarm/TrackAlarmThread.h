@@ -47,6 +47,7 @@ private:
         bool insideArea);
     void applyAreaEscalationResult(const AreaEscalationEvaluator::Result& result);
     bool findAlarmArea(int groupId, int areaId, AlarmArea* out) const;
+    bool findConfiguredNoAlarmArea(const QPointF& point, QString* areaKey) const;
     bool containsCurrentPoint(const AlarmArea& area, const QPointF& point) const;
     AreaEscalationEvaluator::AreaDefinition toEscalationArea(const AlarmArea& area) const;
     AreaEscalationProtectionResolver::Context resolveProtectionContext(

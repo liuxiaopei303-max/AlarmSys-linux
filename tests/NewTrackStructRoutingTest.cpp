@@ -74,6 +74,28 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    proto::TargetObject selfReportedDrone = airTarget;
+    selfReportedDrone.set_target_id("2900001");
+    auto* selfReportSource = selfReportedDrone.add_sources();
+    selfReportSource->mutable_source_profile()->set_radar_source_present(true);
+    auto* selfReportFusion = selfReportSource->mutable_source_profile()
+        ->mutable_radar_source()->mutable_target_profile()->add_fusionsources();
+    selfReportFusion->set_datasourceid("zibaowei");
+    selfReportFusion->set_trackid(4001);
+    SPxPacketTrackExtended convertedSelfReportedDrone;
+    if (!NewTrackStructGrpcConvert::targetToSpxExtended(
+            selfReportedDrone, convertedSelfReportedDrone, true)
+        || convertedSelfReportedDrone.fusion.trackID[0] != 4001U) {
+        qCritical() << "self-report source track id was not preserved for air allow-list"
+                    << convertedSelfReportedDrone.fusion.trackID[0];
+        return 1;
+    }
+    if (NewTrackStructGrpcConvert::resolveTargetTypeForScoring(
+            QString(), convertedSelfReportedDrone) != QStringLiteral("drone")) {
+        qCritical() << "existing drone scoring fallback changed unexpectedly";
+        return 1;
+    }
+
     proto::TargetObject unifiedAirTarget;
     unifiedAirTarget.set_target_id("1545999");
     unifiedAirTarget.set_reality_type(proto::RealityType_VIRTUAL);
@@ -101,6 +123,43 @@ int main(int argc, char** argv)
         || unifiedSurfaceDecision.domain != NewTrackStructGrpcConvert::TargetRouteDomain::Surface) {
         qCritical() << "unified virtual surface target was not routed to SURFACE"
                     << unifiedSurfaceDecision.reason;
+        return 1;
+    }
+
+    SPxPacketTrackExtended convertedUnifiedSurface;
+    if (!NewTrackStructGrpcConvert::targetToSpxExtended(
+            unifiedSurfaceTarget, convertedUnifiedSurface, false)) {
+        qCritical() << "unified virtual surface ship was not converted";
+        return 1;
+    }
+    if (NewTrackStructGrpcConvert::resolveTargetTypeForScoring(
+            QString(), convertedUnifiedSurface) != QStringLiteral("ship")) {
+        qCritical() << "explicit SURFACE_SHIP was not retained for alarm scoring"
+                    << convertedUnifiedSurface.norm.min.reserved2;
+        return 1;
+    }
+    if (NewTrackStructGrpcConvert::resolveTargetTypeForScoring(
+            QStringLiteral("fishingboat"), convertedUnifiedSurface)
+        != QStringLiteral("fishingboat")) {
+        qCritical() << "cognitive target type no longer overrides track fallback";
+        return 1;
+    }
+
+    SPxPacketTrackExtended convertedBuoy;
+    if (!NewTrackStructGrpcConvert::targetToSpxExtended(
+            buoyTarget, convertedBuoy, false)
+        || !NewTrackStructGrpcConvert::resolveTargetTypeForScoring(
+                QString(), convertedBuoy).isEmpty()) {
+        qCritical() << "surface buoy was incorrectly treated as ship";
+        return 1;
+    }
+
+    SPxPacketTrackExtended legacySurfaceTrack{};
+    legacySurfaceTrack.norm.min.reserved1 = 1;
+    legacySurfaceTrack.norm.min.reserved2 = proto::UnitType_SURFACE_SHIP;
+    if (!NewTrackStructGrpcConvert::resolveTargetTypeForScoring(
+            QString(), legacySurfaceTrack).isEmpty()) {
+        qCritical() << "unsigned legacy reserved2 value was incorrectly trusted";
         return 1;
     }
 

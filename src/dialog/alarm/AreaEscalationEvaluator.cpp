@@ -493,6 +493,8 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
             TargetSnapshot& aggregated = byTarget[key];
             aggregated.observations.append(snapshot.observations);
             aggregated.suppressNewEvent = aggregated.suppressNewEvent || snapshot.suppressNewEvent;
+            aggregated.suppressAllNewEvents =
+                aggregated.suppressAllNewEvents || snapshot.suppressAllNewEvents;
         }
     }
 
@@ -571,8 +573,11 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
                 } else if (!allowTransitions && state.stage == Stage::None) {
                     areaState.alarmEntryTimeMs = 0;
                     areaState.speedEntryLatched = false;
-                } else if (!areaState.seen || !areaState.inside
-                           || areaState.alarmEntryTimeMs <= 0) {
+                } else if (snapshot.domain == TargetDomain::Air
+                           && (!areaState.seen || !areaState.inside
+                               || areaState.alarmEntryTimeMs <= 0)) {
+                    // 对空保持原有的 B 区几何停留计时；本次连续资格
+                    // 收紧只解决对海慢速盘旋目标的误告警。
                     areaState.alarmEntryTimeMs = nowMs;
                 }
             }
@@ -603,8 +608,11 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
         };
 
         // 知识库中的对海威胁目标是独立的直接告警证据。它仍要求当前点位于 B，
-        // 但按产品约定绕过免告警区以及所有普通规则硬条件/评分。
-        if (snapshot.domain == TargetDomain::Surface) {
+        // 并绕过普通规则硬条件/评分；精确免告警区会阻止它创建新事件，
+        // 但不影响已经存在的活动事件继续升级。
+        const bool allowArchiveTransition =
+            !snapshot.suppressAllNewEvents || state.stage != Stage::None;
+        if (snapshot.domain == TargetDomain::Surface && allowArchiveTransition) {
             for (const EvaluatedObservation& item : evaluated) {
                 const AreaEvidence& evidence = item.observation.evidence;
                 if (item.observation.role != AreaRole::Alarm
@@ -703,11 +711,27 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
                     }
                 }
 
-                const qint64 dwellMs = item.inside && areaState.alarmEntryTimeMs > 0
+                // 对海 B 区的 7 秒是“达到预警分且硬条件持续有效”
+                // 的连续时间，不是单纯几何停留时间。任一条件中断都从
+                // 下次全部合格的样本重新计时，避免慢速盘旋目标偶发
+                // 两帧超速后立即告警。对空保持原有威胁分门槛和停留口径。
+                const bool surface = snapshot.domain == TargetDomain::Surface;
+                const int highThreshold = surface
+                    ? item.observation.prewarningThreshold
+                    : item.observation.threatThreshold;
+                const bool highEligible = item.inside && evidence.available
+                    && evidence.score >= highThreshold
+                    && evidence.hard.allPassed();
+                if (surface) {
+                    if (!highEligible) {
+                        areaState.alarmEntryTimeMs = 0;
+                    } else if (areaState.alarmEntryTimeMs <= 0) {
+                        areaState.alarmEntryTimeMs = nowMs;
+                    }
+                }
+                const qint64 dwellMs = highEligible && areaState.alarmEntryTimeMs > 0
                     ? std::max<qint64>(0, nowMs - areaState.alarmEntryTimeMs) : 0;
-                if (item.inside && evidence.available
-                    && evidence.score >= item.observation.threatThreshold
-                    && evidence.hard.allPassed()) {
+                if (highEligible) {
                     if (evidence.opticSeen) {
                         upgradeFrom(Stage::Alarm, Disposition::VerifySuccess,
                                     QStringLiteral("optic"), item);

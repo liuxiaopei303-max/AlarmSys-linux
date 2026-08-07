@@ -1,5 +1,6 @@
 #include "customconfig.h"
 #include "dialog/alarm/AlarmContentBuilder.h"
+#include "dialog/alarm/NoAlarmAreaPolicy.h"
 #include "grpc_alarm/AlarmGrpcSnapshotClient.hpp"
 #include "grpc_alarm/AlarmGrpcDestroySubscriber.hpp"
 #include "grpc_target_type/TargetTypeGrpcClient.hpp"
@@ -2364,6 +2365,28 @@ void CustomConfig::LoadConfig()
             m_alarmLogic.noAlarmGroupIds.insert(legacyNoAlarmGroupId);
     } else {
         parseCsvIntSet(QStringLiteral("1,2"), &m_alarmLogic.noAlarmGroupIds);
+    }
+    {
+        QStringList rejectedNoAlarmAreaKeys;
+        m_alarmLogic.noAlarmAreaKeys = NoAlarmAreaPolicy::parseAreaKeys(
+            settings.value(QStringLiteral("AlarmLogic/NoAlarmAreaKeyList")),
+            &rejectedNoAlarmAreaKeys);
+        m_alarmLogic.noAlarmAreaSchemeIds = NoAlarmAreaPolicy::parseSchemeIds(
+            settings.value(QStringLiteral("AlarmLogic/NoAlarmAreaSchemeIdList")));
+        if (!rejectedNoAlarmAreaKeys.isEmpty()) {
+            qWarning().noquote() << QStringLiteral(
+                "AlarmLogic 精确免告警区配置含无效项，已忽略: [%1]")
+                .arg(rejectedNoAlarmAreaKeys.join(QLatin1Char(',')));
+        }
+        QStringList configuredNoAlarmAreaKeys = m_alarmLogic.noAlarmAreaKeys.values();
+        configuredNoAlarmAreaKeys.sort();
+        QStringList configuredNoAlarmAreaSchemeIds =
+            m_alarmLogic.noAlarmAreaSchemeIds.values();
+        configuredNoAlarmAreaSchemeIds.sort();
+        qInfo().noquote() << QStringLiteral(
+            "AlarmLogic 精确免告警区（仅对海新事件）: areas=[%1] schemes=[%2]")
+            .arg(configuredNoAlarmAreaKeys.join(QLatin1Char(',')),
+                 configuredNoAlarmAreaSchemeIds.join(QLatin1Char(',')));
     }
     m_alarmLogic.fuseMapRequireContain = settings.value("AlarmLogic/FuseMapRequireContain", 1).toInt();
     m_alarmLogic.trackAlreadyHasAlarmWindowMs = settings.value("AlarmLogic/TrackAlreadyHasAlarmWindowMs", 60000).toInt();

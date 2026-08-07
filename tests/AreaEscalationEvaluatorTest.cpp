@@ -192,26 +192,56 @@ void dwellOpticAndLifecycleTests()
 
     e.reset(pair());
     e.evaluateCycle({target(QPointF(9, 1), 20, 20)}, 1000);
-    CHECK("22. 20-59分B满7秒升HIGH", one(e.evaluateCycle({target(QPointF(9, 1), 20, 20)}, 8000)).stage == Evaluator::Stage::Alarm);
+    const auto lowScoreDwell = one(
+        e.evaluateCycle({target(QPointF(9, 1), 20, 20)}, 8000));
+    CHECK("22. B内满7秒但未到预警分不升HIGH",
+          lowScoreDwell.stage == Evaluator::Stage::Threat
+              && lowScoreDwell.reason == QStringLiteral("score"));
 
     // 识别图片是 optic 升级证据，不是 B 区事件或 7 秒连续停留的前置条件。
     // 否则“光电看到 或 连续在 B 中 7 秒”会退化成只有光电一条路径。
     e.reset(pair());
-    auto noDetection = target(QPointF(9, 1), 20, 20);
+    auto noDetection = target(QPointF(9, 1), 60, 60);
     noDetection.alarm.hard.detection = false;
     const auto noDetectionInitial = one(e.evaluateCycle({noDetection}, 1000));
     const auto noDetectionDwell = one(e.evaluateCycle({noDetection}, 8000));
-    CHECK("22b. B区无识别图片仍形成LOW事件",
-          noDetectionInitial.stage == Evaluator::Stage::Threat);
+    CHECK("22b. B区无识别图片仍形成MEDIUM事件",
+          noDetectionInitial.stage == Evaluator::Stage::Prewarning);
     CHECK("22b. B区无识别图片满7秒仍升HIGH",
           noDetectionDwell.stage == Evaluator::Stage::Alarm
               && noDetectionDwell.reason == QStringLiteral("alarm_area_dwell"));
 
     e.reset(pair());
-    auto opticB = target(QPointF(9, 1), 20, 20);
+    auto lowScoreOpticB = target(QPointF(9, 1), 20, 20);
+    lowScoreOpticB.alarm.opticSeen = true;
+    const auto lowScoreOpticResult = one(e.evaluateCycle({lowScoreOpticB}, 1000));
+    CHECK("23. B内MinIO命中但未到预警分不升HIGH",
+          lowScoreOpticResult.stage == Evaluator::Stage::Threat
+              && lowScoreOpticResult.reason == QStringLiteral("score"));
+
+    e.reset(pair());
+    auto opticB = target(QPointF(9, 1), 60, 60);
     opticB.alarm.opticSeen = true;
-    const auto opticResult = one(e.evaluateCycle({opticB}, 0));
-    CHECK("23. B内MinIO命中", opticResult.stage == Evaluator::Stage::Alarm && opticResult.reason == QStringLiteral("optic"));
+    const auto opticResult = one(e.evaluateCycle({opticB}, 1000));
+    CHECK("23b. B内MinIO命中且达预警分直接HIGH",
+          opticResult.stage == Evaluator::Stage::Alarm
+              && opticResult.reason == QStringLiteral("optic"));
+
+    e.reset(pair());
+    e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 1000);
+    auto interrupted = target(QPointF(9, 1), 60, 60);
+    interrupted.alarm.hard.speed = false;
+    interrupted.alarm.hard.failure = QStringLiteral("speed");
+    e.evaluateCycle({interrupted}, 5000);
+    const auto resumed = one(
+        e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 8000));
+    const auto continuous = one(
+        e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 15000));
+    CHECK("23c. B内硬条件中断后重新计7秒",
+          resumed.stage == Evaluator::Stage::Prewarning
+              && resumed.alarmDwellMs == 0
+              && continuous.stage == Evaluator::Stage::Alarm
+              && continuous.reason == QStringLiteral("alarm_area_dwell"));
 
     e.reset(pair());
     auto opticA = target(QPointF(1, 1), 60, 60);
@@ -322,7 +352,7 @@ void configurationAndOutputTests()
     e.evaluateCycle({target(QPointF(1, 1), 60, 60)}, 0);
     const auto direct = one(e.evaluateCycle({target(QPointF(9, 1), 60, 60)}, 100));
     e.reset(pair());
-    auto optic = target(QPointF(9, 1), 20, 20);
+    auto optic = target(QPointF(9, 1), 60, 60);
     optic.alarm.opticSeen = true;
     const auto verified = one(e.evaluateCycle({optic}, 0));
     CHECK("30. disposition契约",
@@ -360,7 +390,7 @@ void domainIsolationTests()
     sea.warning.conditionId = surface.warningRuleId;
     sea.alarm.conditionId = surface.alarmRuleId;
 
-    auto aircraft = target(QPointF(9, 1), 20, 20);
+    auto aircraft = target(QPointF(9, 1), 60, 60);
     aircraft.domain = Evaluator::TargetDomain::Air;
     aircraft.laneId = air.laneId;
     aircraft.warning.conditionId = air.warningRuleId;
@@ -382,6 +412,25 @@ void domainIsolationTests()
                 && result.reason == QStringLiteral("alarm_area_dwell"));
     }
     CHECK("31. 海空状态互不覆盖", surfaceDirect && airDwell);
+
+    CHECK("31b. 对空保持原威胁分停留口径", e.reset(p));
+    auto lowScoreAir = target(QPointF(9, 1), 20, 20);
+    lowScoreAir.domain = Evaluator::TargetDomain::Air;
+    lowScoreAir.laneId = air.laneId;
+    lowScoreAir.warning.conditionId = air.warningRuleId;
+    lowScoreAir.alarm.conditionId = air.alarmRuleId;
+    e.evaluateCycle({lowScoreAir}, 1000);
+    const auto lowScoreAirDwell = one(e.evaluateCycle({lowScoreAir}, 8000));
+    CHECK("31b. 对空20分B区满7秒仍升HIGH",
+          lowScoreAirDwell.stage == Evaluator::Stage::Alarm
+              && lowScoreAirDwell.reason == QStringLiteral("alarm_area_dwell"));
+
+    CHECK("31c. 对空保持原光电口径", e.reset(p));
+    lowScoreAir.alarm.opticSeen = true;
+    const auto lowScoreAirOptic = one(e.evaluateCycle({lowScoreAir}, 1000));
+    CHECK("31c. 对空20分光电命中仍直接HIGH",
+          lowScoreAirOptic.stage == Evaluator::Stage::Alarm
+              && lowScoreAirOptic.reason == QStringLiteral("optic"));
 }
 
 void schemeRoundTripTests()
@@ -479,7 +528,7 @@ void multiAreaAnyToAnyTests()
     CHECK("35. 多B独立计时策略可重置", e.reset(policy, &error));
     Evaluator::TargetSnapshot dwell = inA1;
     for (Evaluator::AreaObservation& value : dwell.observations)
-        value.evidence.score = 20;
+        value.evidence.score = 60;
     dwell.position = QPointF(9, 1);
     e.evaluateCycle({dwell}, 1000);
     e.evaluateCycle({dwell}, 7900);
@@ -487,7 +536,7 @@ void multiAreaAnyToAnyTests()
     const auto enteredB2 = one(e.evaluateCycle({dwell}, 8000));
     const auto fullB2Dwell = one(e.evaluateCycle({dwell}, 15000));
     CHECK("35. B2不继承B1停留时间",
-          enteredB2.stage == Evaluator::Stage::Threat
+          enteredB2.stage == Evaluator::Stage::Prewarning
               && enteredB2.alarmDwellMs == 0
               && fullB2Dwell.stage == Evaluator::Stage::Alarm
               && fullB2Dwell.reason == QStringLiteral("alarm_area_dwell")
@@ -501,17 +550,20 @@ void multiAreaAnyToAnyTests()
     dwell.suppressNewEvent = false;
     const auto suppressionReleased = one(e.evaluateCycle({dwell}, 9001));
     CHECK("36. 离开免告警后从当前时刻开始B计时",
-          suppressionReleased.stage == Evaluator::Stage::Threat
+          suppressionReleased.stage == Evaluator::Stage::Prewarning
               && suppressionReleased.alarmDwellMs == 0);
 
     CHECK("36. 已有事件测试策略可重置", e.reset(policy, &error));
     dwell.position = QPointF(1, 1);
     dwell.suppressNewEvent = false;
+    for (Evaluator::AreaObservation& value : dwell.observations)
+        value.evidence.score = 20;
     CHECK("36. 先形成LOW活动事件",
           one(e.evaluateCycle({dwell}, 0)).stage == Evaluator::Stage::Threat);
     dwell.position = QPointF(9, 1);
     dwell.suppressNewEvent = true;
     for (Evaluator::AreaObservation& value : dwell.observations) {
+        value.evidence.score = 60;
         value.evidence.opticSeen = value.role == Evaluator::AreaRole::Alarm
             && value.area == Evaluator::AreaKey{3, 15};
     }
@@ -519,6 +571,19 @@ void multiAreaAnyToAnyTests()
     CHECK("36. 已有事件在免告警区继续升级",
           activeContinues.stage == Evaluator::Stage::Alarm
               && activeContinues.reason == QStringLiteral("optic"));
+
+    CHECK("36. 精确免告警区知识库测试策略可重置", e.reset(policy, &error));
+    Evaluator::TargetSnapshot strictArchive = dwell;
+    strictArchive.position = QPointF(9, 1);
+    strictArchive.suppressNewEvent = true;
+    strictArchive.suppressAllNewEvents = true;
+    for (Evaluator::AreaObservation& value : strictArchive.observations) {
+        value.evidence.archiveVisitMatched =
+            value.role == Evaluator::AreaRole::Alarm;
+        value.evidence.archiveThreatScore = 90;
+    }
+    CHECK("36. 精确免告警区阻止知识库创建新HIGH",
+          e.evaluateCycle({strictArchive}, 1000).isEmpty());
 }
 
 } // namespace

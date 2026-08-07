@@ -339,8 +339,9 @@ QString buildRuleAlarmContent(const AlarmContentBuildInput& input)
         input.hasDetection ? &input.detection : nullptr;
     const QString domain = input.isAirTrack ? QStringLiteral("空中") : QStringLiteral("海上");
     const QString domainKey = input.isAirTrack ? QStringLiteral("air") : QStringLiteral("sea");
-    const QString typeRaw = resolveTargetTypeRaw(input.cfg, input.uniqueId, detPtr);
-    const QString typeLabel = resolveTargetTypeLabel(input.cfg, input.uniqueId, detPtr);
+    const QString typeRaw = AlarmContentBuilderSupport::applyExplicitTypeFallback(
+        resolveTargetTypeRaw(input.cfg, input.uniqueId, detPtr), input.fallbackTargetType);
+    const QString typeLabel = targetTypeToChinese(typeRaw);
     const QString angleLabel =
         input.hasProtectArea ? QStringLiteral("进攻方向") : QStringLiteral("航向");
     const double angleValue = input.hasProtectArea ? input.attackAngleDeg : input.courseDeg;

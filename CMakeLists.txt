@@ -40,6 +40,8 @@ set(ALARM_SOURCES
     "${ALARM_SRC_DIR}/common/commonfunc.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AlarmAreaGeometryParser.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/ArchiveVisitEvidence.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AirAlarmEligibility.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/NoAlarmAreaPolicy.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/TrackAlarmThread.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationEvaluator.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationProtectionResolver.cpp"
@@ -171,6 +173,33 @@ set_target_properties(area_escalation_evaluator_test PROPERTIES
     AUTOMOC OFF
 )
 add_test(NAME area_escalation_evaluator_test COMMAND area_escalation_evaluator_test)
+
+add_executable(air_alarm_eligibility_test
+    "${CMAKE_SOURCE_DIR}/tests/AirAlarmEligibilityTest.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AirAlarmEligibility.cpp"
+)
+target_include_directories(air_alarm_eligibility_test PRIVATE
+    "${ALARM_SRC_DIR}"
+    "${SPX_INCLUDES}"
+)
+target_link_libraries(air_alarm_eligibility_test PRIVATE Qt5::Core Qt5::Gui)
+set_target_properties(air_alarm_eligibility_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    AUTOMOC OFF
+)
+add_test(NAME air_alarm_eligibility_test COMMAND air_alarm_eligibility_test)
+
+add_executable(no_alarm_area_policy_test
+    "${CMAKE_SOURCE_DIR}/tests/NoAlarmAreaPolicyTest.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/NoAlarmAreaPolicy.cpp"
+)
+target_include_directories(no_alarm_area_policy_test PRIVATE "${ALARM_SRC_DIR}")
+target_link_libraries(no_alarm_area_policy_test PRIVATE Qt5::Core)
+set_target_properties(no_alarm_area_policy_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    AUTOMOC OFF
+)
+add_test(NAME no_alarm_area_policy_test COMMAND no_alarm_area_policy_test)
 
 add_executable(area_escalation_protection_resolver_test
     "${CMAKE_SOURCE_DIR}/tests/AreaEscalationProtectionResolverTest.cpp"

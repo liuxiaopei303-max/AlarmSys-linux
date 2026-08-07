@@ -38,8 +38,29 @@ using trackmanager::grpc::new_track_struct::ThreatLevel_HIGH;
 using trackmanager::grpc::new_track_struct::ThreatLevel_LOW;
 using trackmanager::grpc::new_track_struct::ThreatLevel_MEDIUM;
 using trackmanager::grpc::new_track_struct::UnitType_DRONE;
+using trackmanager::grpc::new_track_struct::UnitType_SURFACE_SHIP;
 
 constexpr double kEps = 1e-6;
+constexpr uint16_t kClassifiedTypeMarkerMask = 0xFF00U;
+constexpr uint16_t kClassifiedTypeMarker = 0xA500U;
+constexpr uint16_t kClassifiedTypeValueMask = 0x00FFU;
+
+uint16_t encodeClassifiedType(int classifiedType)
+{
+    return static_cast<uint16_t>(
+        kClassifiedTypeMarker | (static_cast<uint16_t>(classifiedType) & kClassifiedTypeValueMask));
+}
+
+bool decodeClassifiedType(uint16_t encoded, uint16_t* classifiedType)
+{
+    if ((encoded & kClassifiedTypeMarkerMask) != kClassifiedTypeMarker) {
+        return false;
+    }
+    if (classifiedType != nullptr) {
+        *classifiedType = encoded & kClassifiedTypeValueMask;
+    }
+    return true;
+}
 
 const RadarObservedTargetProfile* findRadarProfile(const TargetObject& t)
 {
@@ -274,6 +295,9 @@ bool targetToSpxExtended(const TargetObject& t, SPxPacketTrackExtended& out, boo
     }
     out.norm.reserved3 = threatScoreFromPriority(t);
     fillFusionTrackIds(t, out);
+    // reserved1 保持既有的无人机筛选语义；reserved2 此前未被 AlarmSys 使用，
+    // 用带签名值保留统一航迹的明确 classified_type，避免误读旧 SPx 数据。
+    out.norm.min.reserved2 = encodeClassifiedType(static_cast<int>(t.classified_type()));
 
     if (t.classified_type() == UnitType_DRONE) {
         out.norm.min.reserved1 = 3;
@@ -281,6 +305,27 @@ bool targetToSpxExtended(const TargetObject& t, SPxPacketTrackExtended& out, boo
         out.norm.min.reserved1 = 1;
     }
     return true;
+}
+
+QString resolveTargetTypeForScoring(
+    const QString& cognitiveTargetType,
+    const SPxPacketTrackExtended& track)
+{
+    if (!cognitiveTargetType.isEmpty()) {
+        return cognitiveTargetType;
+    }
+
+    // 保持原有对空兜底，不改变无人机行为。
+    if (track.norm.min.reserved1 == 3) {
+        return QStringLiteral("drone");
+    }
+
+    uint16_t classifiedType = 0;
+    if (decodeClassifiedType(track.norm.min.reserved2, &classifiedType)
+        && classifiedType == static_cast<uint16_t>(UnitType_SURFACE_SHIP)) {
+        return QStringLiteral("ship");
+    }
+    return QString();
 }
 
 } // namespace NewTrackStructGrpcConvert

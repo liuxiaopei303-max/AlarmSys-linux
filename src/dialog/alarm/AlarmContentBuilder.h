@@ -6,6 +6,20 @@
 
 class CustomConfig;
 
+namespace AlarmContentBuilderSupport {
+
+inline QString applyExplicitTypeFallback(
+    const QString& resolvedTargetType,
+    const QString& fallbackTargetType)
+{
+    if (resolvedTargetType == QLatin1String("unknown") && !fallbackTargetType.isEmpty()) {
+        return fallbackTargetType.trimmed().toLower();
+    }
+    return resolvedTargetType;
+}
+
+} // namespace AlarmContentBuilderSupport
+
 /** 告警 content 组装入参（在 TrackAlarmThread 研判通过时填充；数值须为触发时刻） */
 struct AlarmContentBuildInput {
     const AlarmRule* rule = nullptr;
@@ -28,6 +42,8 @@ struct AlarmContentBuildInput {
     QString triggerPath;
     DataAccessLayer::DetectionTypeResult detection;
     bool hasDetection = false;
+    /** 仅用于上游明确分类、但认知库尚无类型时的窄范围回退。 */
+    QString fallbackTargetType;
 };
 
 /** 规则触发的告警原因（写入 AlarmItem.content；JSON：summary + 分值 + 图片元数据） */

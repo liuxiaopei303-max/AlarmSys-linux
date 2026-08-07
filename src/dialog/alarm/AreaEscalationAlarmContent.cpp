@@ -10,10 +10,16 @@ QString readableEscalationSuffix(const AreaEscalationEvaluator::Result& result)
 {
     if (result.reason == QLatin1String("direct_entry"))
         return QStringLiteral("，升级为正式告警：持预警资格进入告警区");
-    if (result.reason == QLatin1String("optic"))
-        return QStringLiteral("，升级为正式告警：告警区内已有光电取证");
-    if (result.reason == QLatin1String("alarm_area_dwell"))
-        return QStringLiteral("，升级为正式告警：在告警区连续停留达到阈值");
+    if (result.reason == QLatin1String("optic")) {
+        return result.domain == AreaEscalationEvaluator::TargetDomain::Surface
+            ? QStringLiteral("，升级为正式告警：告警区内达到预警分且已有光电取证")
+            : QStringLiteral("，升级为正式告警：告警区内已有光电取证");
+    }
+    if (result.reason == QLatin1String("alarm_area_dwell")) {
+        return result.domain == AreaEscalationEvaluator::TargetDomain::Surface
+            ? QStringLiteral("，升级为正式告警：告警区内分数和硬条件连续达标达到时长阈值")
+            : QStringLiteral("，升级为正式告警：在告警区连续停留达到阈值");
+    }
     if (result.reason == QLatin1String("score")) {
         if (result.stage == AreaEscalationEvaluator::Stage::Prewarning)
             return QStringLiteral("，当前阶段：预警（评分达到预警阈值）");

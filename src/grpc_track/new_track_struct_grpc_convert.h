@@ -75,6 +75,16 @@ bool targetToSpxExtended(
     SPxPacketTrackExtended& out,
     bool birdTopic);
 
+/**
+ * 解析告警评分使用的目标类型。
+ *
+ * 认知结果始终优先；仅在认知结果为空时，才使用统一航迹转换时保留的
+ * 明确分类。返回空字符串表示没有可靠的评分类型。
+ */
+QString resolveTargetTypeForScoring(
+    const QString& cognitiveTargetType,
+    const SPxPacketTrackExtended& track);
+
 uint32_t preserveStableUniqueId(uint32_t previous, uint32_t incoming);
 
 } // namespace NewTrackStructGrpcConvert

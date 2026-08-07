@@ -1,9 +1,12 @@
 #include "TrackAlarmThread.h"
 #include "AlarmAreaGeometryParser.h"
+#include "AirAlarmEligibility.h"
 #include "AlarmContentBuilder.h"
 #include "AlarmFileLogger.h"
+#include "NoAlarmAreaPolicy.h"
 #include "alarm_geoproj.h"
 #include "grpc_alarm/AlarmGrpcSnapshotMapping.h"
+#include "grpc_track/new_track_struct_grpc_convert.h"
 #include <QDebug>
 #include "common/commonfunc.h"
 #include <QHash>
@@ -808,6 +811,37 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 			const qint64 cognitiveUniqueId = track.secondary.uniqueID > 0
 				? static_cast<qint64>(track.secondary.uniqueID) : targetId;
 
+			// 精确免告警区只作用于对海融合航迹。它是“禁止创建新事件”边界，
+			// 因此放在知识库/黑名单等直告路径之前；已有发布告警仍沿原路径持续。
+			QString exactNoAlarmAreaKey;
+			const bool insideExactNoAlarmArea = type == 0
+				&& findConfiguredNoAlarmArea(
+					QPointF(track.latDegs, track.longDegs), &exactNoAlarmAreaKey);
+			const bool hasPublishedBeforeExactArea = insideExactNoAlarmArea
+				&& trackHasPublishedAlarm(
+					gConfig, targetId, al.trackAlreadyHasAlarmWindowMs);
+			if (NoAlarmAreaPolicy::shouldSuppressNewEvent(
+					true, insideExactNoAlarmArea, hasPublishedBeforeExactArea)) {
+				logAlarmTraceThrottled(
+					QStringLiteral("upd_skip_exact_noalarm_%1_%2")
+						.arg(targetId).arg(info.condition_id),
+					QStringLiteral(
+						"updataAlarmTrackToDB skip------targetId:%1 "
+						"reason:exact_no_alarm_area area:%2 domain:SURFACE conditionId:%3")
+						.arg(targetId).arg(exactNoAlarmAreaKey).arg(info.condition_id),
+					10000);
+				continue;
+			}
+			if (insideExactNoAlarmArea && hasPublishedBeforeExactArea) {
+				logAlarmTraceThrottled(
+					QStringLiteral("upd_exact_noalarm_keep_%1").arg(targetId),
+					QStringLiteral(
+						"updataAlarmTrackToDB exact_no_alarm_area_keep------targetId:%1 "
+						"area:%2 domain:SURFACE hasPublishedAlarm:1 conditionId:%3")
+						.arg(targetId).arg(exactNoAlarmAreaKey).arg(info.condition_id),
+					30000);
+			}
+
 			// 对海知识库命中是最高优先级的业务告警证据：当前规则的区域候选已经
 			// 在调用本函数前形成，命中后只保留 SaveToDB 内的人工删除过滤。
 			if (type == 0) {
@@ -882,6 +916,11 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 				in.threatScore = threatScoreForContent;
 				in.hasProtectArea = hasProtectArea;
 				in.isAirTrack = isAirTrackForContent;
+				const QString trackTypeFallback =
+					NewTrackStructGrpcConvert::resolveTargetTypeForScoring(QString(), track);
+				if (trackTypeFallback == QLatin1String("ship")) {
+					in.fallbackTargetType = trackTypeFallback;
+				}
 				in.triggerPath = triggerPath;
 				if (hasLastThreatBreakdown) {
 					in.hasThreatBreakdown = true;
@@ -1540,6 +1579,32 @@ bool TrackAlarmThread::findAlarmArea(int groupId, int areaId, AlarmArea* out) co
 	return false;
 }
 
+bool TrackAlarmThread::findConfiguredNoAlarmArea(
+	const QPointF& point, QString* matchedAreaKey) const
+{
+	if (matchedAreaKey != nullptr)
+		matchedAreaKey->clear();
+	if (gConfig == nullptr || gConfig->m_alarmLogic.noAlarmAreaKeys.isEmpty()
+		|| !NoAlarmAreaPolicy::isEnabledForScheme(
+			gConfig->m_alarmLogic.noAlarmAreaSchemeIds,
+			gConfig->m_activeAlarmSchemeId))
+		return false;
+
+	for (auto groupIt = m_maparea.constBegin(); groupIt != m_maparea.constEnd(); ++groupIt) {
+		for (const AlarmArea& area : groupIt.value()) {
+			if (!NoAlarmAreaPolicy::isConfigured(
+					gConfig->m_alarmLogic.noAlarmAreaKeys, area.groupID, area.areaID)
+				|| !containsCurrentPoint(area, point)) {
+				continue;
+			}
+			if (matchedAreaKey != nullptr)
+				*matchedAreaKey = NoAlarmAreaPolicy::areaKey(area.groupID, area.areaID);
+			return true;
+		}
+	}
+	return false;
+}
+
 AreaEscalationProtectionResolver::Context TrackAlarmThread::resolveProtectionContext(
 	const AlarmRule& rule,
 	AreaEscalationEvaluator::TargetDomain domain) const
@@ -1906,6 +1971,7 @@ void TrackAlarmThread::processAreaEscalation()
 	QHash<QString, DataAccessLayer::DetectionTypeResult> detectionCache;
 	QHash<QString, bool> opticCache;
 	QHash<QString, bool> noAlarmCache;
+	QHash<QString, bool> strictNoAlarmCache;
 
 	auto businessTargetId = [](qint64 mapKey, const SPxPacketTrackExtended& track) {
 		if (mapKey > 0) return mapKey;
@@ -1921,22 +1987,35 @@ void TrackAlarmThread::processAreaEscalation()
 			if (targetId <= 0) continue;
 			const auto domain = binding.domain;
 			liveTargets.insert({domain, targetId});
-			const QString targetKey = QStringLiteral("%1|%2")
-				.arg(static_cast<int>(domain)).arg(targetId);
-			const QString speedKey = QStringLiteral("%1|%2")
-				.arg(binding.rule.condition_id).arg(targetId);
-			liveSpeedKeys.insert(speedKey);
 
 			if (gConfig->isUniqueIdAlarmFiltered(targetId)) {
 				m_areaEscalationEvaluator.clearTarget(domain, targetId);
 				continue; // 人工结束事件同时清资格
 			}
-			if (domain == AreaEscalationEvaluator::TargetDomain::Air
-				&& gConfig->m_alarmLogic.mode == 0
-				&& track.norm.min.reserved1 != 3) {
-				m_areaEscalationEvaluator.clearTarget(domain, targetId);
-				continue;
+			if (domain == AreaEscalationEvaluator::TargetDomain::Air) {
+				const AirAlarmEligibility::Decision admission =
+					AirAlarmEligibility::decide(track, gConfig->m_alarmLogic);
+				if (admission.skip) {
+					m_areaEscalationEvaluator.clearTarget(domain, targetId);
+					logAlarmTraceThrottled(
+						QStringLiteral("area_escalation_air_skip_%1_%2")
+							.arg(targetId).arg(admission.reason),
+						QStringLiteral(
+							"AreaEscalation air target skipped------target:%1 reason:%2 "
+							"fusionTid:%3 conditionId:%4")
+							.arg(targetId).arg(admission.reason)
+							.arg(admission.matchedFusionTrackId)
+							.arg(binding.rule.condition_id),
+						10000);
+					continue;
+				}
 			}
+
+			const QString targetKey = QStringLiteral("%1|%2")
+				.arg(static_cast<int>(domain)).arg(targetId);
+			const QString speedKey = QStringLiteral("%1|%2")
+				.arg(binding.rule.condition_id).arg(targetId);
+			liveSpeedKeys.insert(speedKey);
 
 			const QPointF point(track.latDegs, track.longDegs);
 			const bool insideArea = containsCurrentPoint(binding.runtimeArea, point);
@@ -1951,18 +2030,44 @@ void TrackAlarmThread::processAreaEscalation()
 			snapshot.courseDeg = track.norm.min.courseDegrees;
 			snapshot.speedMps = track.norm.min.speedMps;
 			if (!noAlarmCache.contains(targetKey)) {
-				bool insideNoAlarm = false;
+				bool insideLegacyNoAlarm = false;
 				for (int groupId : gConfig->m_alarmLogic.noAlarmGroupIds) {
 					if (groupId >= 0 && isTrackInGroupAreaByGroupId(point, groupId)) {
-						insideNoAlarm = true;
+						insideLegacyNoAlarm = true;
 						break;
 					}
 				}
-				const bool hasPublished = insideNoAlarm && trackHasPublishedAlarm(
+				QString exactNoAlarmAreaKey;
+				const bool isSurface =
+					domain == AreaEscalationEvaluator::TargetDomain::Surface;
+				const bool insideExactNoAlarm = isSurface
+					&& findConfiguredNoAlarmArea(point, &exactNoAlarmAreaKey);
+				const bool hasPublished = (insideLegacyNoAlarm || insideExactNoAlarm)
+					&& trackHasPublishedAlarm(
 					gConfig, targetId, gConfig->m_alarmLogic.trackAlreadyHasAlarmWindowMs);
-				noAlarmCache.insert(targetKey, insideNoAlarm && !hasPublished);
+				const bool exactSuppression =
+					NoAlarmAreaPolicy::shouldSuppressNewEvent(
+						isSurface, insideExactNoAlarm, hasPublished);
+				noAlarmCache.insert(
+					targetKey, (insideLegacyNoAlarm && !hasPublished) || exactSuppression);
+				strictNoAlarmCache.insert(targetKey, exactSuppression);
+				if (insideExactNoAlarm) {
+					const QString action = exactSuppression
+						? QStringLiteral("suppress_new") : QStringLiteral("keep_existing");
+					logAlarmTraceThrottled(
+						QStringLiteral("area_escalation_exact_noalarm_%1_%2")
+							.arg(targetId).arg(action),
+						QStringLiteral(
+							"AreaEscalation exact no-alarm area------domain:SURFACE "
+							"target:%1 area:%2 action:%3 hasPublishedAlarm:%4")
+							.arg(targetId).arg(exactNoAlarmAreaKey).arg(action)
+							.arg(hasPublished ? 1 : 0),
+						exactSuppression ? 10000 : 30000);
+				}
 			}
 			snapshot.suppressNewEvent = noAlarmCache.value(targetKey, false);
+			snapshot.suppressAllNewEvents =
+				strictNoAlarmCache.value(targetKey, false);
 
 			const qint64 detectionId = track.secondary.uniqueID > 0
 				? static_cast<qint64>(track.secondary.uniqueID) : targetId;
@@ -2147,6 +2252,11 @@ void TrackAlarmThread::applyAreaEscalationResult(
 			readableInput.protectionReferenceCenter = protection.center;
 			readableInput.protectionReferenceRadiusM = protection.radiusMeters;
 			readableInput.isAirTrack = isAir;
+			const QString trackTypeFallback =
+				NewTrackStructGrpcConvert::resolveTargetTypeForScoring(QString(), evidenceTrack);
+			if (trackTypeFallback == QLatin1String("ship")) {
+				readableInput.fallbackTargetType = trackTypeFallback;
+			}
 			readableInput.hasThreatBreakdown = true;
 			readableInput.threatBreakdown = assessment;
 			readableInput.triggerPath = result.reason == QLatin1String("direct_entry")
@@ -5056,12 +5166,10 @@ ThreatAssessmentResult TrackAlarmThread::calculateThreatAssessment(const SPxPack
 {
 	ThreatAssessmentResult result;
 
-	// 1. 根据检测结果确定目标类型评分
-	QString finalTargetType = detectionResult.finalTargetType;
-	// 无认知类型时：对空 reserved1==3（无人机）按 drone；其余空类型不给类型分
-	if (finalTargetType.isEmpty() && track.norm.min.reserved1 == 3) {
-		finalTargetType = QStringLiteral("drone");
-	}
+	// 1. 根据检测结果确定目标类型评分。认知结果优先；无认知结果时，仅信任
+	// 统一航迹转换层带签名保留的明确分类（以及原有无人机 reserved1 语义）。
+	QString finalTargetType = NewTrackStructGrpcConvert::resolveTargetTypeForScoring(
+		detectionResult.finalTargetType, track);
 	if (!finalTargetType.isEmpty()) {
 		if (finalTargetType == "speedboat" || finalTargetType == "yacht") {
 			result.targetTypeScore = threatParams.seaSpeedboatScore;

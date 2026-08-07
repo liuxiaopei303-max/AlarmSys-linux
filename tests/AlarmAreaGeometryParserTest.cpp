@@ -50,6 +50,20 @@ void portWarningAreaRegression()
           parsed.points.last() == QPointF(37.55875219, 122.07494128));
 }
 
+void exactNoAlarmAreaRegression()
+{
+    const QString areaPoints = QStringLiteral(
+        "4,37.56134605,122.11808052,37.55791964,122.10962935,"
+        "37.5476906,122.09937182,37.5477929,122.11891918");
+    const AlarmAreaPointList parsed = parseAlarmAreaPointList(areaPoints);
+
+    CHECK("4/6 重画后的四个顶点解析有效", parsed.valid);
+    CHECK("4/6 保留全部四个顶点", parsed.points.size() == 4);
+    CHECK("4/6 内部校验点属于免告警多边形",
+          parsed.points.containsPoint(
+              QPointF(37.55368730, 122.11150022), Qt::OddEvenFill));
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -57,6 +71,7 @@ int main(int argc, char** argv)
     QCoreApplication app(argc, argv);
     portAlarmAreaRegression();
     portWarningAreaRegression();
+    exactNoAlarmAreaRegression();
     qInfo() << "AlarmAreaGeometryParser tests completed, failures=" << failures;
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -99,7 +99,7 @@ public:
         bool targetType = true;
         bool targetAttributes = true;
         // 是否存在识别结果，仅作为 optic/类型证据记录。无识别结果
-        // 不能阻断基础事件或 B 区 7 秒停留升级。
+        // 不能阻断基础事件或 B 区连续 7 秒合格升级。
         bool detection = true;
         bool protectDistance = true;
         bool entryTime = true;
@@ -143,6 +143,8 @@ public:
         QList<AreaObservation> observations;
         /** 位于免告警区；只在尚无活动事件时阻止创建。 */
         bool suppressNewEvent = false;
+        /** 精确免告警区；连知识库直告也只允许已有活动事件继续。 */
+        bool suppressAllNewEvents = false;
         // 以下单 A/B 证据字段保留给旧调用者和既有测试。
         AreaEvidence warning;
         AreaEvidence alarm;
@@ -166,6 +168,7 @@ public:
         bool insideAlarm = false;
         bool qualified = false;
         qint64 qualificationTimeMs = 0;
+        /** 兼容字段名：SURFACE 为 B 区连续合格起始，AIR 为 B 区几何进入时间。 */
         qint64 alarmEntryTimeMs = 0;
         qint64 alarmDwellMs = 0;
         qint64 warningToAlarmMs = -1;
@@ -219,6 +222,7 @@ private:
         AreaRole role = AreaRole::Warning;
         bool seen = false;
         bool inside = false;
+        /** SURFACE HIGH 连续资格起始（失效即清零）；AIR 保持几何进区时间。 */
         qint64 alarmEntryTimeMs = 0;
         bool speedEntryLatched = false;
         quint64 speedEntryCycle = 0;
