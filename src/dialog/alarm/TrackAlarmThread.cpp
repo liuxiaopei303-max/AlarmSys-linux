@@ -811,34 +811,39 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 			const qint64 cognitiveUniqueId = track.secondary.uniqueID > 0
 				? static_cast<qint64>(track.secondary.uniqueID) : targetId;
 
-			// 精确免告警区只作用于对海融合航迹。它是“禁止创建新事件”边界，
+			// 当前方案精确免告警区作用于对海融合和对空航迹。它是“禁止创建新事件”边界，
 			// 因此放在知识库/黑名单等直告路径之前；已有发布告警仍沿原路径持续。
 			QString exactNoAlarmAreaKey;
-			const bool insideExactNoAlarmArea = type == 0
+			const bool supportsExactNoAlarmArea = type == 0 || type == 3;
+			const bool insideExactNoAlarmArea = supportsExactNoAlarmArea
 				&& findConfiguredNoAlarmArea(
-					QPointF(track.latDegs, track.longDegs), &exactNoAlarmAreaKey);
+					QPointF(track.latDegs, track.longDegs), type, &exactNoAlarmAreaKey);
 			const bool hasPublishedBeforeExactArea = insideExactNoAlarmArea
 				&& trackHasPublishedAlarm(
 					gConfig, targetId, al.trackAlreadyHasAlarmWindowMs);
 			if (NoAlarmAreaPolicy::shouldSuppressNewEvent(
-					true, insideExactNoAlarmArea, hasPublishedBeforeExactArea)) {
+					insideExactNoAlarmArea, hasPublishedBeforeExactArea)) {
+				const QString noAlarmDomain = type == 3
+					? QStringLiteral("AIR") : QStringLiteral("SURFACE");
 				logAlarmTraceThrottled(
 					QStringLiteral("upd_skip_exact_noalarm_%1_%2")
 						.arg(targetId).arg(info.condition_id),
 					QStringLiteral(
 						"updataAlarmTrackToDB skip------targetId:%1 "
-						"reason:exact_no_alarm_area area:%2 domain:SURFACE conditionId:%3")
-						.arg(targetId).arg(exactNoAlarmAreaKey).arg(info.condition_id),
+						"reason:exact_no_alarm_area area:%2 domain:%3 conditionId:%4")
+						.arg(targetId).arg(exactNoAlarmAreaKey).arg(noAlarmDomain).arg(info.condition_id),
 					10000);
 				continue;
 			}
 			if (insideExactNoAlarmArea && hasPublishedBeforeExactArea) {
+				const QString noAlarmDomain = type == 3
+					? QStringLiteral("AIR") : QStringLiteral("SURFACE");
 				logAlarmTraceThrottled(
 					QStringLiteral("upd_exact_noalarm_keep_%1").arg(targetId),
 					QStringLiteral(
 						"updataAlarmTrackToDB exact_no_alarm_area_keep------targetId:%1 "
-						"area:%2 domain:SURFACE hasPublishedAlarm:1 conditionId:%3")
-						.arg(targetId).arg(exactNoAlarmAreaKey).arg(info.condition_id),
+						"area:%2 domain:%3 hasPublishedAlarm:1 conditionId:%4")
+						.arg(targetId).arg(exactNoAlarmAreaKey).arg(noAlarmDomain).arg(info.condition_id),
 					30000);
 			}
 
@@ -1580,20 +1585,18 @@ bool TrackAlarmThread::findAlarmArea(int groupId, int areaId, AlarmArea* out) co
 }
 
 bool TrackAlarmThread::findConfiguredNoAlarmArea(
-	const QPointF& point, QString* matchedAreaKey) const
+	const QPointF& point, int trackType, QString* matchedAreaKey) const
 {
 	if (matchedAreaKey != nullptr)
 		matchedAreaKey->clear();
-	if (gConfig == nullptr || gConfig->m_alarmLogic.noAlarmAreaKeys.isEmpty()
-		|| !NoAlarmAreaPolicy::isEnabledForScheme(
-			gConfig->m_alarmLogic.noAlarmAreaSchemeIds,
-			gConfig->m_activeAlarmSchemeId))
+	if (gConfig == nullptr || gConfig->m_activeSchemeNoAlarmAreas.isEmpty())
 		return false;
 
 	for (auto groupIt = m_maparea.constBegin(); groupIt != m_maparea.constEnd(); ++groupIt) {
 		for (const AlarmArea& area : groupIt.value()) {
-			if (!NoAlarmAreaPolicy::isConfigured(
-					gConfig->m_alarmLogic.noAlarmAreaKeys, area.groupID, area.areaID)
+			if (!NoAlarmAreaPolicy::appliesTo(
+					gConfig->m_activeSchemeNoAlarmAreas,
+					area.groupID, area.areaID, trackType)
 				|| !containsCurrentPoint(area, point)) {
 				continue;
 			}
@@ -1708,12 +1711,13 @@ bool TrackAlarmThread::configureAreaEscalation(const QList<AlarmRule>& rules)
 			alarmAreas[key].append(rule);
 	}
 
-	// 旧方案可能只有历史 alarm_level=2 或 alarm_level=3；继续使用旧规则路径。
-	if (warningAreas.isEmpty() || alarmAreas.isEmpty()) {
+	// 没有预警/告警角色时才保留旧规则路径；仅 A 或仅 B 也由新引擎统一处理。
+	if (warningAreas.isEmpty() && alarmAreas.isEmpty()) {
 		AreaEscalationEvaluator::PolicyDefinition disabled;
 		m_areaEscalationEvaluator.reset(disabled);
 		qInfo().noquote() << QStringLiteral(
-			"AreaEscalation legacy compatibility mode warningAreaCount=%1 alarmAreaCount=%2 generation=%3")
+			"AreaEscalation no warning/alarm roles, legacy compatibility mode "
+			"warningAreaCount=%1 alarmAreaCount=%2 generation=%3")
 			.arg(warningAreas.size()).arg(alarmAreas.size()).arg(m_areaEscalationGeneration);
 		return false;
 	}
@@ -1800,8 +1804,10 @@ bool TrackAlarmThread::configureAreaEscalation(const QList<AlarmRule>& rules)
 	}
 	if (m_areaEscalationBindings.isEmpty())
 		return fail(QStringLiteral("多区域策略未形成任何规则绑定"));
-	policy.warningArea = policy.warningAreas.first();
-	policy.alarmArea = policy.alarmAreas.first();
+	if (!policy.warningAreas.isEmpty())
+		policy.warningArea = policy.warningAreas.first();
+	if (!policy.alarmAreas.isEmpty())
+		policy.alarmArea = policy.alarmAreas.first();
 
 	QString error;
 	if (!m_areaEscalationEvaluator.reset(policy, &error))
@@ -2038,16 +2044,17 @@ void TrackAlarmThread::processAreaEscalation()
 					}
 				}
 				QString exactNoAlarmAreaKey;
-				const bool isSurface =
-					domain == AreaEscalationEvaluator::TargetDomain::Surface;
-				const bool insideExactNoAlarm = isSurface
-					&& findConfiguredNoAlarmArea(point, &exactNoAlarmAreaKey);
+				const int noAlarmTrackType =
+					domain == AreaEscalationEvaluator::TargetDomain::Air ? 3 : 0;
+				const bool insideExactNoAlarm =
+					findConfiguredNoAlarmArea(
+						point, noAlarmTrackType, &exactNoAlarmAreaKey);
 				const bool hasPublished = (insideLegacyNoAlarm || insideExactNoAlarm)
 					&& trackHasPublishedAlarm(
 					gConfig, targetId, gConfig->m_alarmLogic.trackAlreadyHasAlarmWindowMs);
 				const bool exactSuppression =
 					NoAlarmAreaPolicy::shouldSuppressNewEvent(
-						isSurface, insideExactNoAlarm, hasPublished);
+						insideExactNoAlarm, hasPublished);
 				noAlarmCache.insert(
 					targetKey, (insideLegacyNoAlarm && !hasPublished) || exactSuppression);
 				strictNoAlarmCache.insert(targetKey, exactSuppression);
@@ -2058,10 +2065,10 @@ void TrackAlarmThread::processAreaEscalation()
 						QStringLiteral("area_escalation_exact_noalarm_%1_%2")
 							.arg(targetId).arg(action),
 						QStringLiteral(
-							"AreaEscalation exact no-alarm area------domain:SURFACE "
-							"target:%1 area:%2 action:%3 hasPublishedAlarm:%4")
-							.arg(targetId).arg(exactNoAlarmAreaKey).arg(action)
-							.arg(hasPublished ? 1 : 0),
+							"AreaEscalation exact no-alarm area------domain:%1 "
+							"target:%2 area:%3 action:%4 hasPublishedAlarm:%5")
+							.arg(escalationDomainName(domain)).arg(targetId)
+							.arg(exactNoAlarmAreaKey).arg(action).arg(hasPublished ? 1 : 0),
 						exactSuppression ? 10000 : 30000);
 				}
 			}
@@ -2202,7 +2209,9 @@ void TrackAlarmThread::applyAreaEscalationResult(
 		return;
 	QString content;
 
-	if (result.stageChanged) {
+	const bool publishStageChange = result.stageChanged
+		&& isAlarmEventStagePublishable(static_cast<int>(result.stage));
+	if (publishStageChange) {
 		if (result.reason == QLatin1String("archive_visit")) {
 			// 知识库命中不再生成速度/航向/评分规则文案；证据由升级模块确定性组装。
 			content = buildAreaEscalationContent(result);
@@ -2300,7 +2309,7 @@ void TrackAlarmThread::applyAreaEscalationResult(
 			alarm.targetspeed = track.norm.min.speedMps;
 			alarm.targetdir = track.norm.min.courseDegrees;
 			alarm.time = nowText; // 仅刷新内存快照；空白区域不产生 DB UPDATE
-			if (result.stageChanged) {
+			if (publishStageChange) {
 				alarm.escalation_reason = result.reason;
 				alarm.escalation_evidence = content;
 				alarm.alarm_content = content;

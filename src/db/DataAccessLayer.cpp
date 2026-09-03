@@ -1859,6 +1859,48 @@ QString DataAccessLayer::getActiveSchemeId()
     return "default";
 }
 
+NoAlarmAreaPolicy::AreaDomainMap
+DataAccessLayer::getSchemeNoAlarmAreas(const QString& schemeId)
+{
+    NoAlarmAreaPolicy::AreaDomainMap areas;
+    QSet<QString> areasWithBindings;
+    const QString query = QStringLiteral(
+        "SELECT asa.group_id, asa.area_id, atr.rule_id AS bound_rule_id, ar.track_type "
+        "FROM alarm_scheme_areas asa "
+        "LEFT JOIN area_threat_rules atr "
+        "  ON atr.scheme_id = asa.scheme_id AND atr.group_id = asa.group_id "
+        " AND atr.area_id = asa.area_id AND atr.enabled = true "
+        "LEFT JOIN alarm_rule ar ON ar.rule_id = atr.rule_id "
+        "WHERE asa.scheme_id = ? AND asa.warning_type = 4 "
+        "ORDER BY asa.group_id, asa.area_id");
+    QSqlQuery result = m_dbManager.executeQuery(query, { schemeId });
+    while (result.next()) {
+        const QString key = NoAlarmAreaPolicy::areaKey(
+            result.value("group_id").toInt(), result.value("area_id").toInt());
+        if (!areas.contains(key)) areas.insert(key, NoAlarmAreaPolicy::NoDomain);
+        if (!result.value("bound_rule_id").isNull()) areasWithBindings.insert(key);
+        if (!result.value("track_type").isNull()) {
+            const int trackType = result.value("track_type").toInt();
+            const int mask = NoAlarmAreaPolicy::domainMaskForTrackType(trackType);
+            if (mask == NoAlarmAreaPolicy::NoDomain) {
+                qWarning() << "免告警区忽略不支持的 track_type" << trackType
+                           << "area" << key << "scheme" << schemeId;
+            } else {
+                areas[key] |= mask;
+            }
+        }
+    }
+    for (auto it = areas.begin(); it != areas.end(); ++it) {
+        if (!areasWithBindings.contains(it.key())) {
+            it.value() = NoAlarmAreaPolicy::AllDomains;
+        } else if (it.value() == NoAlarmAreaPolicy::NoDomain) {
+            qWarning() << "免告警区存在规则关联但没有有效目标域，按不生效处理"
+                       << "area" << it.key() << "scheme" << schemeId;
+        }
+    }
+    return areas;
+}
+
 QMap<QString, QPair<int, int>> DataAccessLayer::getActiveSchemeProtectAreas()
 {
     QMap<QString, QPair<int, int>> protectAreas;

@@ -298,6 +298,11 @@ bool AlarmGrpcSnapshotClient::pushSnapshot(CustomConfig* cfg)
 
         for (auto it = cfg->m_mapAlarmData.constBegin(); it != cfg->m_mapAlarmData.constEnd(); ++it) {
             const AlarmData& alarmData = it.value();
+            // LOW 是区域升级状态机的内部态，不属于需要发送给 TrackManager 的事件。
+            // 此处再做一次边界过滤，避免历史/异常缓存把 LOW 泄漏到前端。
+            if (!isAlarmEventStagePublishable(alarmData.event_stage)) {
+                continue;
+            }
             const qint64 timeAlarmMs =
                 QDateTime::fromString(alarmData.time, QStringLiteral("yyyy-MM-dd hh:mm:ss.zzz")).toMSecsSinceEpoch();
             if (nowMs - timeAlarmMs > 600 * 1000) {

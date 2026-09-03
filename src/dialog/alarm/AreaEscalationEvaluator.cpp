@@ -135,8 +135,6 @@ bool AreaEscalationEvaluator::PairDefinition::isValid(QString* error) const
 
     const bool multiArea = !warningAreas.isEmpty() || !alarmAreas.isEmpty();
     if (multiArea) {
-        if (warningAreas.isEmpty()) return fail(QStringLiteral("预警区 A 列表不能为空"));
-        if (alarmAreas.isEmpty()) return fail(QStringLiteral("告警区 B 列表不能为空"));
         QSet<AreaKey> warningKeys;
         QSet<AreaKey> alarmKeys;
         for (const AreaDefinition& area : warningAreas) {
@@ -547,6 +545,8 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
         QList<EvaluatedObservation> evaluated;
         bool insideWarning = false;
         bool insideAlarm = false;
+        const bool hasWarningPolicy = !effectiveWarningAreas().isEmpty();
+        const bool hasAlarmPolicy = !effectiveAlarmAreas().isEmpty();
 
         for (const AreaObservation& observation : observations) {
             AreaDefinition definition;
@@ -628,7 +628,19 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
             }
         }
 
-        if (allowTransitions && scoreItem != nullptr) {
+        // 仅告警区模式：普通目标满足 B 区规则全部硬条件并达到高门槛时立即 HIGH。
+        // 知识库和下方光电证据仍保留现有独立升级能力。
+        if (!hasWarningPolicy && hasAlarmPolicy && allowTransitions
+            && scoreItem != nullptr
+            && scoreItem->observation.role == AreaRole::Alarm
+            && scoreItem->observation.evidence.score
+                >= scoreItem->observation.prewarningThreshold) {
+            upgradeFrom(Stage::Alarm, Disposition::Unassigned,
+                        QStringLiteral("alarm_only"), *scoreItem);
+        }
+
+        // 有预警区时沿用 LOW/MEDIUM 两级评分；仅告警区不产生低级事件。
+        if (hasWarningPolicy && allowTransitions && scoreItem != nullptr) {
             const AreaEvidence& evidence = scoreItem->observation.evidence;
             if (evidence.score >= scoreItem->observation.threatThreshold) {
                 const Stage scoreStage = evidence.score >= scoreItem->observation.prewarningThreshold
@@ -735,7 +747,7 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
                     if (evidence.opticSeen) {
                         upgradeFrom(Stage::Alarm, Disposition::VerifySuccess,
                                     QStringLiteral("optic"), item);
-                    } else if (dwellMs >= m_pair.dwellMs) {
+                    } else if (hasWarningPolicy && dwellMs >= m_pair.dwellMs) {
                         upgradeFrom(Stage::Alarm, Disposition::VerifySuccess,
                                     QStringLiteral("alarm_area_dwell"), item);
                     }

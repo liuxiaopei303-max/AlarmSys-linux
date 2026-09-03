@@ -52,6 +52,7 @@ set(ALARM_SOURCES
     "${ALARM_SRC_DIR}/dialog/alarm/AlarmContentBuilder.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationAlarmContent.cpp"
     "${ALARM_SRC_DIR}/db/DataAccessLayer.cpp"
+    "${ALARM_SRC_DIR}/db/DatabaseStartupRetry.cpp"
     "${ALARM_SRC_DIR}/db/DatabaseManager.cpp"
     "${ALARM_SRC_DIR}/db/dbconnectionpool.cpp"
     "${ALARM_SRC_DIR}/db/dbhelper.cpp"
@@ -200,6 +201,17 @@ set_target_properties(no_alarm_area_policy_test PROPERTIES
     AUTOMOC OFF
 )
 add_test(NAME no_alarm_area_policy_test COMMAND no_alarm_area_policy_test)
+
+add_executable(database_startup_retry_test
+    "${CMAKE_SOURCE_DIR}/tests/DatabaseStartupRetryTest.cpp"
+    "${ALARM_SRC_DIR}/db/DatabaseStartupRetry.cpp"
+)
+target_include_directories(database_startup_retry_test PRIVATE "${ALARM_SRC_DIR}")
+set_target_properties(database_startup_retry_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    AUTOMOC OFF
+)
+add_test(NAME database_startup_retry_test COMMAND database_startup_retry_test)
 
 add_executable(area_escalation_protection_resolver_test
     "${CMAKE_SOURCE_DIR}/tests/AreaEscalationProtectionResolverTest.cpp"

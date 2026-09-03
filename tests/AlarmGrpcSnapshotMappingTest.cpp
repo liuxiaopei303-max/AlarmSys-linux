@@ -33,6 +33,17 @@ int main(int argc, char** argv)
           alarmSnapshotLevelFromEventStage(1) == AlarmSnapshotLevel::Low
               && alarmSnapshotLevelFromEventStage(2) == AlarmSnapshotLevel::Medium
               && alarmSnapshotLevelFromEventStage(3) == AlarmSnapshotLevel::High);
+    CHECK("LOW仅保留为内部状态，不生成对外事件",
+          !isAlarmEventStagePublishable(1));
+    CHECK("MEDIUM和HIGH生成对外事件",
+          isAlarmEventStagePublishable(2)
+              && isAlarmEventStagePublishable(3));
+    CHECK("LOW和MEDIUM不能被识别规则自动标记为查证成功",
+          !canIdentificationRuleAutoVerifyEventStage(1)
+              && !canIdentificationRuleAutoVerifyEventStage(2));
+    CHECK("旧规则和HIGH保留原有自动查证行为",
+          canIdentificationRuleAutoVerifyEventStage(0)
+              && canIdentificationRuleAutoVerifyEventStage(3));
     CHECK("日常方案旧规则事件保持正式告警HIGH",
           alarmSnapshotLevelFromEventStage(legacyPublishedAlarmStage())
               == AlarmSnapshotLevel::High);

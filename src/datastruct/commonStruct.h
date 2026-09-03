@@ -119,8 +119,6 @@ struct AlarmLogicConfig {
     QSet<int> birdSkipTrackIds;             /**< birdFilterMode=1 时跳过这些融合 trackID */
     QSet<int> areaGroupIdAllow;             /**< isTrackInGroupArea 允许的 groupID，空=不限制 */
     QSet<int> noAlarmGroupIds;              /**< 免告警区 group_id 列表，空=关闭免告警区判定 */
-    QSet<QString> noAlarmAreaKeys;           /**< 精确免告警区 group_id/area_id；仅抑制对海新事件 */
-    QSet<QString> noAlarmAreaSchemeIds;      /**< 精确免告警区限定方案；空=不限定 */
     int fuseMapRequireContain = 1;          /**< 1=融合航迹必须在 m_mapFuseTrack 中存在（原 Linux） */
     int trackAlreadyHasAlarmWindowMs = 60000; /**< “持续告警”判定窗口 */
     int alarmFilterTtlMs = 3600000;         /**< 灭告警 filter 存续时间（毫秒），默认 1 小时 */

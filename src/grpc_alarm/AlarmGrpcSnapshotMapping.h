@@ -26,6 +26,21 @@ inline AlarmSnapshotLevel alarmSnapshotLevelFromEventStage(int eventStage)
     return AlarmSnapshotLevel::Low;
 }
 
+/** LOW 只参与区域升级状态机；从 MEDIUM 起才是需要推送的告警事件。 */
+inline bool isAlarmEventStagePublishable(int eventStage)
+{
+    return eventStage >= 2;
+}
+
+/**
+ * 区域升级 LOW/MEDIUM 的事件级别必须由威胁阈值决定，不能因为识别规则命中
+ * 而把处置状态自动改为 VERIFY_SUCCESS。eventStage=0 是旧规则事件，保留兼容行为。
+ */
+inline bool canIdentificationRuleAutoVerifyEventStage(int eventStage)
+{
+    return eventStage <= 0 || eventStage >= 3;
+}
+
 /** 旧规则路径一旦发布事件，其语义就是正式告警，不再按固定分数区间猜 level。 */
 inline int legacyPublishedAlarmStage()
 {

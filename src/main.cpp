@@ -1,6 +1,7 @@
 #include "AlarmHttpServer.h"
 #include "customconfig.h"
 #include "db/DatabaseManager.h"
+#include "db/DatabaseStartupRetry.h"
 #include "dialog/alarm/TrackAlarmThread.h"
 #include "dialog/alarm/SuspiciousTargetThread.h"
 #include "dialog/analysis/TargetTypeFusionThread.h"
@@ -10,6 +11,9 @@
 #include <QDebug>
 #include <QDir>
 #include <QTextCodec>
+#include <QThread>
+
+#include <cstdlib>
 
 int main(int argc, char* argv[])
 {
@@ -28,9 +32,38 @@ int main(int argc, char* argv[])
     CustomConfig* cfg = CustomConfig::getInstance();
     cfg->LoadConfig();
 
-    cfg->m_dbInitSuccess = cfg->dbHelper.initDatabase();
-    if (!cfg->m_dbInitSuccess) {
-        qWarning() << "数据库初始化失败，请检查配置与 SQL 文件路径";
+    constexpr int databaseStartupAttempts = 60;
+    constexpr int databaseRetryDelayMs = 1000;
+    const auto databaseStartup = alarmsys::db::initializeDatabaseWithRetry(
+        [cfg]() {
+            if (!cfg->m_dbInitSuccess) {
+                cfg->m_dbInitSuccess = cfg->dbHelper.initDatabase();
+            }
+            if (!cfg->m_dbInitSuccess) {
+                qWarning() << "数据库尚未就绪，等待后重试";
+            }
+            return cfg->m_dbInitSuccess;
+        },
+        [cfg]() { cfg->reloadAlarmConfigFromDb(QStringLiteral("all")); },
+        [](int delayMs) { QThread::msleep(static_cast<unsigned long>(delayMs)); },
+        databaseStartupAttempts,
+        databaseRetryDelayMs);
+
+    if (!databaseStartup.ready) {
+        qCritical() << "数据库连续" << databaseStartup.attempts
+                    << "次初始化失败，终止启动并交由容器重启策略重试";
+        return EXIT_FAILURE;
+    }
+    qInfo() << "数据库与告警运行配置已就绪，尝试次数:" << databaseStartup.attempts;
+
+    // 热更新入口是告警引擎的关键能力。端口冲突时不得继续启动告警管线，
+    // 否则该实例会永久保留旧规则并继续向 gRPC 推送错误快照。
+    const quint16 httpPort = static_cast<quint16>(cfg->m_struBasicConfig.m_nTaskHostPort);
+    AlarmHttpServer http(cfg);
+    if (!http.start(httpPort)) {
+        qCritical() << "告警 HTTP 端口" << httpPort
+                    << "不可用，拒绝启动告警管线；请检查是否存在重复 alarmsys 实例";
+        return EXIT_FAILURE;
     }
 
     cfg->InitFastdds();
@@ -58,12 +91,6 @@ int main(int argc, char* argv[])
     // AccessMode=1(libpq) 后不再经 Qt 连接池强杀 inUse；研判逻辑本身安全，重新开启
     TargetTypeFusionThread* targetTypeFusionThread = new TargetTypeFusionThread();
     targetTypeFusionThread->start();
-
-    const quint16 httpPort = static_cast<quint16>(cfg->m_struBasicConfig.m_nTaskHostPort);
-    AlarmHttpServer http(cfg);
-    if (!http.start(httpPort)) {
-        qWarning() << "HTTP 未启动，进程仍运行 DDS 告警逻辑";
-    }
 
     // 不注册 SIGINT/SIGTERM：原先空 handleSig 会吞掉 Ctrl+C；交给默认行为即可结束进程
     const int code = app.exec();

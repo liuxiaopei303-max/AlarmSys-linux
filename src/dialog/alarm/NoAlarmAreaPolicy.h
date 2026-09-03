@@ -1,32 +1,35 @@
 #pragma once
 
-#include <QSet>
+#include <QMap>
 #include <QString>
-#include <QStringList>
-#include <QVariant>
 
 /**
  * 精确免告警区策略。
  *
- * 区域键统一为 `group_id/area_id`，配置兼容 `4-6`、`4/6`、`4_6`。
- * 精确区域只用于对海新事件抑制；已有告警和对空目标不受影响。
+ * 区域键统一为 `group_id/area_id`，值是由区域威胁规则 track_type 生成的目标域掩码。
+ * 空规则由数据库适配器映射为 AllDomains；已有发布告警继续处理。
  */
 namespace NoAlarmAreaPolicy {
 
+enum DomainMask {
+    NoDomain = 0,
+    SurfaceDomain = 1,
+    AirDomain = 2,
+    AllDomains = SurfaceDomain | AirDomain
+};
+
+using AreaDomainMap = QMap<QString, int>;
+
 QString areaKey(int groupId, int areaId);
 
-QSet<QString> parseAreaKeys(const QVariant& configuredValue,
-                            QStringList* rejectedValues = nullptr);
+int domainMaskForTrackType(int trackType);
 
-QSet<QString> parseSchemeIds(const QVariant& configuredValue);
+bool appliesTo(const AreaDomainMap& configuredAreas,
+               int groupId,
+               int areaId,
+               int trackType);
 
-bool isEnabledForScheme(const QSet<QString>& configuredSchemeIds,
-                        const QString& activeSchemeId);
-
-bool isConfigured(const QSet<QString>& configuredKeys, int groupId, int areaId);
-
-bool shouldSuppressNewEvent(bool isSurfaceTarget,
-                            bool insideConfiguredArea,
+bool shouldSuppressNewEvent(bool insideConfiguredArea,
                             bool hasPublishedAlarm);
 
 } // namespace NoAlarmAreaPolicy

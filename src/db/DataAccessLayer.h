@@ -7,6 +7,8 @@
 #include <QList>
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QSet>
+#include "dialog/alarm/NoAlarmAreaPolicy.h"
 #include "DatabaseManager.h"
 #include "datastruct/commonStruct.h"
 #include "dialog/alarm/ArchiveVisitEvidence.h"
@@ -246,6 +248,7 @@ public:
     ThreatAssessmentParams getThreatAssessmentParams(int groupId, int areaId);
     ThreatAssessmentParams getThreatAssessmentParams(int groupId, int areaId, const QString& schemeId);
     QString getActiveSchemeId(); // 获取当前活跃的方案ID
+    NoAlarmAreaPolicy::AreaDomainMap getSchemeNoAlarmAreas(const QString& schemeId);
     QMap<QString, QPair<int, int>> getActiveSchemeProtectAreas(); // 获取当前活跃方案的保护区信息 <areaKey, <protectGroupID, protectAreaID>>
     bool saveThreatAssessmentParams(const ThreatAssessmentParams& params);
 

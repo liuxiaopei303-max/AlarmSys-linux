@@ -1,7 +1,7 @@
 #include "customconfig.h"
 #include "dialog/alarm/AlarmContentBuilder.h"
-#include "dialog/alarm/NoAlarmAreaPolicy.h"
 #include "grpc_alarm/AlarmGrpcSnapshotClient.hpp"
+#include "grpc_alarm/AlarmGrpcSnapshotMapping.h"
 #include "grpc_alarm/AlarmGrpcDestroySubscriber.hpp"
 #include "grpc_target_type/TargetTypeGrpcClient.hpp"
 #include <QSettings>
@@ -422,6 +422,7 @@ CustomConfig::CustomConfig()
     m_mapTargetInfoFilter = dbHelper.getTargetInfoFilter();
     m_listThreatAssessmentParams = dbHelper.getThreatAssessmentParams();
     m_activeAlarmSchemeId = dbHelper.getActiveSchemeId();
+    m_activeSchemeNoAlarmAreas = dbHelper.getSchemeNoAlarmAreas(m_activeAlarmSchemeId);
     m_mapSchemeProtectAreas = dbHelper.getActiveSchemeProtectAreas();
 
     m_gNetworkManager = new QNetworkAccessManager;
@@ -892,11 +893,19 @@ void CustomConfig::reloadAlarmConfigFromDb(const QString& scope)
     }
     const QString s = scope.trimmed().isEmpty() ? QStringLiteral("all") : scope.trimmed();
     const bool all = (s == QLatin1String("all"));
+    if (all) {
+        m_listTargetInfo = dbHelper.getAllTargetInfo();
+        m_mapTargetInfoFilter = dbHelper.getTargetInfoFilter();
+        qInfo() << "热更新 target_info: targets" << m_listTargetInfo.size()
+                << "filters" << m_mapTargetInfoFilter.size();
+    }
     if (all || s == QLatin1String("alarm_rules")) {
         // 数据库读取放在锁外；完整快照在一个写锁临界区内一次性发布。
         const QMap<QString, AlarmRule> nextAlarmRules = dbHelper.getAlarmRule();
         const QList<AreaInfo> nextAlarmAreas = dbHelper.getAreaInfo();
         const QString nextActiveSchemeId = dbHelper.getActiveSchemeId();
+        const NoAlarmAreaPolicy::AreaDomainMap nextNoAlarmAreas =
+            dbHelper.getSchemeNoAlarmAreas(nextActiveSchemeId);
         const QMap<QString, QPair<int, int>> nextProtectAreas =
             dbHelper.getActiveSchemeProtectAreas();
         int clearedAlarmCount = 0;
@@ -905,6 +914,7 @@ void CustomConfig::reloadAlarmConfigFromDb(const QString& scope)
             m_mapAlarmRule = nextAlarmRules;
             m_alarmArea = nextAlarmAreas;
             m_activeAlarmSchemeId = nextActiveSchemeId;
+            m_activeSchemeNoAlarmAreas = nextNoAlarmAreas;
             m_mapSchemeProtectAreas = nextProtectAreas;
             // 方案切换/规则重载是事件生命周期边界：清除旧方案内存快照，
             // 避免演示方案与日常方案往返时继续上报旧 condition_id。
@@ -916,6 +926,7 @@ void CustomConfig::reloadAlarmConfigFromDb(const QString& scope)
         qInfo() << "热更新 alarm_rules: alarm_setting" << m_mapAlarmRule.size()
                 << "area" << m_alarmArea.size()
                 << "scheme" << m_activeAlarmSchemeId
+                << "no_alarm_areas" << m_activeSchemeNoAlarmAreas.size()
                 << "cleared_active_events" << clearedAlarmCount;
     }
     if (all || s == QLatin1String("threat_params")) {
@@ -1236,16 +1247,21 @@ AlarmEffectiveDisposition CustomConfig::resolveRuleAlarmDisposition(const AlarmD
         break;
     }
 
-    bool anyRuleHadConstraints = false;
-    const bool verifyOk = evalIdentificationRulesUnion(
-        m_mapAreaKeyToIdentificationRuleIds,
-        m_mapAlarmIdentificationRulesSub,
-        alarmData,
-        dbHelper,
-        anyRuleHadConstraints);
     const bool manuallyConfirmed = m_setManualConfirmedUniqueIds.contains(
         static_cast<qint64>(alarmData.unique_id));
-    if (manuallyConfirmed || (anyRuleHadConstraints && verifyOk)) {
+    bool identificationRuleVerified = false;
+    if (!manuallyConfirmed
+        && canIdentificationRuleAutoVerifyEventStage(alarmData.event_stage)) {
+        bool anyRuleHadConstraints = false;
+        const bool verifyOk = evalIdentificationRulesUnion(
+            m_mapAreaKeyToIdentificationRuleIds,
+            m_mapAlarmIdentificationRulesSub,
+            alarmData,
+            dbHelper,
+            anyRuleHadConstraints);
+        identificationRuleVerified = anyRuleHadConstraints && verifyOk;
+    }
+    if (manuallyConfirmed || identificationRuleVerified) {
         out.task_status = 3;
 
         if (!m_mapAlarmIdentificationResolvedTime.contains(alarmData.alarm_id)) {
@@ -2365,28 +2381,6 @@ void CustomConfig::LoadConfig()
             m_alarmLogic.noAlarmGroupIds.insert(legacyNoAlarmGroupId);
     } else {
         parseCsvIntSet(QStringLiteral("1,2"), &m_alarmLogic.noAlarmGroupIds);
-    }
-    {
-        QStringList rejectedNoAlarmAreaKeys;
-        m_alarmLogic.noAlarmAreaKeys = NoAlarmAreaPolicy::parseAreaKeys(
-            settings.value(QStringLiteral("AlarmLogic/NoAlarmAreaKeyList")),
-            &rejectedNoAlarmAreaKeys);
-        m_alarmLogic.noAlarmAreaSchemeIds = NoAlarmAreaPolicy::parseSchemeIds(
-            settings.value(QStringLiteral("AlarmLogic/NoAlarmAreaSchemeIdList")));
-        if (!rejectedNoAlarmAreaKeys.isEmpty()) {
-            qWarning().noquote() << QStringLiteral(
-                "AlarmLogic 精确免告警区配置含无效项，已忽略: [%1]")
-                .arg(rejectedNoAlarmAreaKeys.join(QLatin1Char(',')));
-        }
-        QStringList configuredNoAlarmAreaKeys = m_alarmLogic.noAlarmAreaKeys.values();
-        configuredNoAlarmAreaKeys.sort();
-        QStringList configuredNoAlarmAreaSchemeIds =
-            m_alarmLogic.noAlarmAreaSchemeIds.values();
-        configuredNoAlarmAreaSchemeIds.sort();
-        qInfo().noquote() << QStringLiteral(
-            "AlarmLogic 精确免告警区（仅对海新事件）: areas=[%1] schemes=[%2]")
-            .arg(configuredNoAlarmAreaKeys.join(QLatin1Char(',')),
-                 configuredNoAlarmAreaSchemeIds.join(QLatin1Char(',')));
     }
     m_alarmLogic.fuseMapRequireContain = settings.value("AlarmLogic/FuseMapRequireContain", 1).toInt();
     m_alarmLogic.trackAlreadyHasAlarmWindowMs = settings.value("AlarmLogic/TrackAlreadyHasAlarmWindowMs", 60000).toInt();

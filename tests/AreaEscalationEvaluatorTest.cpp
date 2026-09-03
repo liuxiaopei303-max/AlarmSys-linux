@@ -399,6 +399,17 @@ void domainIsolationTests()
     const auto first = e.evaluateCycle({sea, aircraft}, 1000);
     CHECK("31. 相同数值ID的海空目标分别输出", first.size() == 2);
 
+    CHECK("31. 对空免告警测试策略可重置", e.reset(p));
+    auto suppressedAircraft = aircraft;
+    suppressedAircraft.targetId += 1000;
+    suppressedAircraft.suppressNewEvent = true;
+    suppressedAircraft.suppressAllNewEvents = true;
+    CHECK("31. 对空目标首次位于免告警区不创建事件",
+          e.evaluateCycle({suppressedAircraft}, 1000).isEmpty());
+
+    CHECK("31. 海空状态测试策略可重置", e.reset(p));
+    e.evaluateCycle({sea, aircraft}, 1000);
+
     sea.position = QPointF(9, 1);
     const auto second = e.evaluateCycle({sea, aircraft}, 8000);
     bool surfaceDirect = false;
@@ -586,6 +597,78 @@ void multiAreaAnyToAnyTests()
           e.evaluateCycle({strictArchive}, 1000).isEmpty());
 }
 
+void singleRolePolicyTests()
+{
+    Evaluator::PolicyDefinition warningOnly;
+    warningOnly.enabled = true;
+    warningOnly.warningAreas = {rect(16, 0, 0, 4, 4)};
+
+    Evaluator e;
+    QString error;
+    CHECK("37. 仅预警区策略可启用", e.reset(warningOnly, &error));
+
+    Evaluator::TargetSnapshot low;
+    low.targetId = 3701;
+    low.position = QPointF(1, 1);
+    low.observations = {
+        observation({3, 16}, Evaluator::AreaRole::Warning, 30,
+                    QStringLiteral("warning-only"))
+    };
+    const auto lowResult = one(e.evaluateCycle({low}, 100));
+    CHECK("37. 仅预警区达到 level1 产生 LOW",
+          lowResult.stage == Evaluator::Stage::Threat);
+
+    Evaluator::TargetSnapshot medium = low;
+    medium.targetId = 3702;
+    medium.observations[0].evidence.score = 60;
+    const auto mediumResult = one(e.evaluateCycle({medium}, 200));
+    CHECK("37. 仅预警区达到 level2 产生 MEDIUM 而非 HIGH",
+          mediumResult.stage == Evaluator::Stage::Prewarning);
+
+    Evaluator::PolicyDefinition alarmOnly;
+    alarmOnly.enabled = true;
+    alarmOnly.alarmAreas = {rect(15, 0, 0, 4, 4)};
+    CHECK("38. 仅告警区策略可启用", e.reset(alarmOnly, &error));
+
+    Evaluator::TargetSnapshot below;
+    below.targetId = 3801;
+    below.position = QPointF(1, 1);
+    below.observations = {
+        observation({3, 15}, Evaluator::AreaRole::Alarm, 30,
+                    QStringLiteral("alarm-only"))
+    };
+    CHECK("38. 仅告警区低于 level2 不产生普通事件",
+          e.evaluateCycle({below}, 100).isEmpty());
+
+    Evaluator::TargetSnapshot high = below;
+    high.targetId = 3802;
+    high.observations[0].evidence.score = 60;
+    const auto highResult = one(e.evaluateCycle({high}, 200));
+    CHECK("38. 仅告警区达到 level2 立即 HIGH",
+          highResult.stage == Evaluator::Stage::Alarm
+              && highResult.reason == QStringLiteral("alarm_only"));
+
+    Evaluator::TargetSnapshot archived = below;
+    archived.targetId = 3803;
+    archived.observations[0].evidence.score = 0;
+    archived.observations[0].evidence.archiveVisitMatched = true;
+    archived.observations[0].evidence.archiveThreatScore = 90;
+    const auto archiveResult = one(e.evaluateCycle({archived}, 300));
+    CHECK("38. 仅告警区保留知识库独立 HIGH 证据",
+          archiveResult.stage == Evaluator::Stage::Alarm
+              && archiveResult.reason == QStringLiteral("archive_visit"));
+
+    Evaluator::TargetSnapshot optic = below;
+    optic.targetId = 3804;
+    optic.domain = Evaluator::TargetDomain::Air;
+    optic.observations[0].trackType = 3;
+    optic.observations[0].evidence.opticSeen = true;
+    const auto opticResult = one(e.evaluateCycle({optic}, 400));
+    CHECK("38. 仅告警区保留对空光电独立 HIGH 证据",
+          opticResult.stage == Evaluator::Stage::Alarm
+              && opticResult.reason == QStringLiteral("optic"));
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -599,6 +682,7 @@ int main(int argc, char** argv)
     domainIsolationTests();
     schemeRoundTripTests();
     multiAreaAnyToAnyTests();
+    singleRolePolicyTests();
     archiveVisitTests();
     qInfo() << "AreaEscalationEvaluator tests completed, failures=" << failures;
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
