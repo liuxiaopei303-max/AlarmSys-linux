@@ -5,7 +5,9 @@
 #include "dialog/alarm/TrackAlarmThread.h"
 #include "dialog/alarm/SuspiciousTargetThread.h"
 #include "dialog/analysis/TargetTypeFusionThread.h"
+#include "grpc_alarm/AlarmGrpcSnapshotClient.hpp"
 #include "grpc_system_alarm/SystemAlarmGrpcServer.hpp"
+#include "http_alarm/AlarmHttpSnapshotPublisher.hpp"
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -69,6 +71,14 @@ int main(int argc, char* argv[])
     cfg->InitFastdds();
     cfg->startAlarmDestroyGrpcSubscriber();
 
+    alarmsys::http_alarm::AlarmHttpSnapshotPublisher httpAlarmPublisher([cfg]() {
+        if (!cfg->m_alarmGrpcClient) {
+            return trackmanager::grpc::alarm::AlarmSnapshotRequest();
+        }
+        return cfg->m_alarmGrpcClient->buildCurrentSnapshot(cfg);
+    });
+    httpAlarmPublisher.start();
+
     alarmsys::grpc_system_alarm::SystemAlarmGrpcServer systemAlarmServer;
     if (cfg->m_systemAlarmGrpcEnabled) {
         if (!systemAlarmServer.start(
@@ -97,6 +107,7 @@ int main(int argc, char* argv[])
     // 不注册 SIGINT/SIGTERM：原先空 handleSig 会吞掉 Ctrl+C；交给默认行为即可结束进程
     const int code = app.exec();
 
+    httpAlarmPublisher.stop();
     systemAlarmServer.stop();
 
     alarmThread->stop();

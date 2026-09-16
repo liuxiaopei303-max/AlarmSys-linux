@@ -53,6 +53,9 @@ set(ALARM_SOURCES
     "${ALARM_SRC_DIR}/dialog/alarm/AlarmFileLogger.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AlarmContentBuilder.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationAlarmContent.cpp"
+    "${ALARM_SRC_DIR}/http_alarm/AlarmHttpSnapshotFilter.cpp"
+    "${ALARM_SRC_DIR}/http_alarm/AlarmHttpSnapshotJson.cpp"
+    "${ALARM_SRC_DIR}/http_alarm/AlarmHttpSnapshotPublisher.cpp"
     "${ALARM_SRC_DIR}/db/DataAccessLayer.cpp"
     "${ALARM_SRC_DIR}/db/DatabaseStartupRetry.cpp"
     "${ALARM_SRC_DIR}/db/DatabaseManager.cpp"
@@ -268,6 +271,56 @@ set_target_properties(alarm_grpc_snapshot_mapping_test PROPERTIES
     AUTOMOC OFF
 )
 add_test(NAME alarm_grpc_snapshot_mapping_test COMMAND alarm_grpc_snapshot_mapping_test)
+
+add_executable(alarm_http_snapshot_json_test
+    "${CMAKE_SOURCE_DIR}/tests/AlarmHttpSnapshotJsonTest.cpp"
+    "${ALARM_SRC_DIR}/http_alarm/AlarmHttpSnapshotFilter.cpp"
+    "${ALARM_SRC_DIR}/http_alarm/AlarmHttpSnapshotJson.cpp"
+    "${GRPC_ALARM_GEN_DIR}/alarm_service.pb.cc"
+)
+target_include_directories(alarm_http_snapshot_json_test PRIVATE
+    "${ALARM_SRC_DIR}"
+    "${GRPC_ALARM_GEN_DIR}"
+    "${GRPC_ROOT}/include"
+)
+target_link_libraries(alarm_http_snapshot_json_test PRIVATE
+    Qt5::Core
+    ${PROTOBUF_LIB}
+    ${ABSL_SYNC_LIB}
+    ${ABSL_STRINGS_LIB}
+    pthread
+)
+set_target_properties(alarm_http_snapshot_json_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    AUTOMOC OFF
+)
+add_test(NAME alarm_http_snapshot_json_test COMMAND alarm_http_snapshot_json_test)
+
+add_executable(alarm_http_snapshot_publisher_test
+    "${CMAKE_SOURCE_DIR}/tests/AlarmHttpSnapshotPublisherTest.cpp"
+    "${ALARM_SRC_DIR}/http_alarm/AlarmHttpSnapshotFilter.cpp"
+    "${ALARM_SRC_DIR}/http_alarm/AlarmHttpSnapshotJson.cpp"
+    "${ALARM_SRC_DIR}/http_alarm/AlarmHttpSnapshotPublisher.cpp"
+    "${GRPC_ALARM_GEN_DIR}/alarm_service.pb.cc"
+)
+target_include_directories(alarm_http_snapshot_publisher_test PRIVATE
+    "${ALARM_SRC_DIR}"
+    "${GRPC_ALARM_GEN_DIR}"
+    "${GRPC_ROOT}/include"
+)
+target_link_libraries(alarm_http_snapshot_publisher_test PRIVATE
+    Qt5::Core
+    Qt5::Network
+    ${PROTOBUF_LIB}
+    ${ABSL_SYNC_LIB}
+    ${ABSL_STRINGS_LIB}
+    pthread
+)
+set_target_properties(alarm_http_snapshot_publisher_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    AUTOMOC OFF
+)
+add_test(NAME alarm_http_snapshot_publisher_test COMMAND alarm_http_snapshot_publisher_test)
 
 add_executable(new_track_struct_routing_test
     "${CMAKE_SOURCE_DIR}/tests/NewTrackStructRoutingTest.cpp"
