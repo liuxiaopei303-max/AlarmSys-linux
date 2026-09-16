@@ -28,6 +28,7 @@ set(GRPC_ALARM_GEN_DIR "${CMAKE_SOURCE_DIR}/third_party/grpc_alarm/generated")
 set(GRPC_DESTROY_GEN_DIR "${CMAKE_SOURCE_DIR}/third_party/grpc_destroy/generated")
 set(GRPC_TARGET_TYPE_GEN_DIR "${CMAKE_SOURCE_DIR}/third_party/grpc_target_type/generated")
 set(GRPC_SYSTEM_ALARM_GEN_DIR "${CMAKE_SOURCE_DIR}/third_party/grpc_system_alarm/generated")
+set(GRPC_TARGET_THREAT_GEN_DIR "${CMAKE_SOURCE_DIR}/third_party/grpc_target_threat/generated")
 set(GRPC_FUSION_TRACK_GEN_DIR "${CMAKE_SOURCE_DIR}/third_party/grpc_fusion_track/generated")
 set(GRPC_NEW_TRACK_STRUCT_GEN_DIR "${CMAKE_SOURCE_DIR}/third_party/grpc_new_track_struct/generated")
 set(GRPC_ROOT "/home/inspur/anaconda3" CACHE PATH "gRPC/protobuf install prefix")
@@ -45,6 +46,7 @@ set(ALARM_SOURCES
     "${ALARM_SRC_DIR}/dialog/alarm/TrackAlarmThread.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationEvaluator.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationProtectionResolver.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/ThreatAssessmentCalculator.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/SuspiciousTargetThread.cpp"
     "${ALARM_SRC_DIR}/dialog/analysis/TargetTypeFusionThread.cpp"
     "${ALARM_SRC_DIR}/dialog/analysis/TargetTypeFusionLogic.cpp"
@@ -73,6 +75,7 @@ file(GLOB ALARM_GRPC_SRC CONFIGURE_DEPENDS
     "${ALARM_SRC_DIR}/grpc_alarm/*.cpp"
     "${ALARM_SRC_DIR}/grpc_target_type/*.cpp"
     "${ALARM_SRC_DIR}/grpc_system_alarm/*.cpp"
+    "${ALARM_SRC_DIR}/grpc_target_threat/*.cpp"
     "${ALARM_SRC_DIR}/grpc_track/*.cpp")
 
 set(GRPC_ALARM_GEN_SRC
@@ -90,6 +93,10 @@ set(GRPC_TARGET_TYPE_GEN_SRC
 set(GRPC_SYSTEM_ALARM_GEN_SRC
     "${GRPC_SYSTEM_ALARM_GEN_DIR}/system_alarm.pb.cc"
     "${GRPC_SYSTEM_ALARM_GEN_DIR}/system_alarm.grpc.pb.cc")
+
+set(GRPC_TARGET_THREAT_GEN_SRC
+    "${GRPC_TARGET_THREAT_GEN_DIR}/target_threat_query.pb.cc"
+    "${GRPC_TARGET_THREAT_GEN_DIR}/target_threat_query.grpc.pb.cc")
 
 set(GRPC_FUSION_TRACK_GEN_SRC
     "${GRPC_FUSION_TRACK_GEN_DIR}/fusion_track_stream.pb.cc"
@@ -113,6 +120,7 @@ add_executable(alarmsys
     ${GRPC_DESTROY_GEN_SRC}
     ${GRPC_TARGET_TYPE_GEN_SRC}
     ${GRPC_SYSTEM_ALARM_GEN_SRC}
+    ${GRPC_TARGET_THREAT_GEN_SRC}
     ${GRPC_FUSION_TRACK_GEN_SRC}
     ${GRPC_NEW_TRACK_STRUCT_GEN_SRC}
     ${NEWTRACK_STRUCT_GEN_SRC})
@@ -125,6 +133,7 @@ target_include_directories(alarmsys PRIVATE
     "${GRPC_DESTROY_GEN_DIR}"
     "${GRPC_TARGET_TYPE_GEN_DIR}"
     "${GRPC_SYSTEM_ALARM_GEN_DIR}"
+    "${GRPC_TARGET_THREAT_GEN_DIR}"
     "${GRPC_FUSION_TRACK_GEN_DIR}"
     "${GRPC_NEW_TRACK_STRUCT_GEN_DIR}"
     "${FASTDDS_ROOT}/include"
@@ -284,6 +293,55 @@ set_target_properties(new_track_struct_routing_test PROPERTIES
     AUTOMOC OFF
 )
 add_test(NAME new_track_struct_routing_test COMMAND new_track_struct_routing_test)
+
+add_executable(threat_assessment_calculator_test
+    "${CMAKE_SOURCE_DIR}/tests/ThreatAssessmentCalculatorTest.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/ThreatAssessmentCalculator.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationProtectionResolver.cpp"
+    "${ALARM_SRC_DIR}/grpc_track/new_track_struct_grpc_convert.cpp"
+    "${GRPC_NEW_TRACK_STRUCT_GEN_DIR}/target_stream.pb.cc"
+)
+target_include_directories(threat_assessment_calculator_test PRIVATE
+    "${ALARM_SRC_DIR}"
+    "${SPX_INCLUDES}"
+    "${GRPC_NEW_TRACK_STRUCT_GEN_DIR}"
+    "${GRPC_ROOT}/include"
+)
+target_link_libraries(threat_assessment_calculator_test PRIVATE
+    Qt5::Core
+    Qt5::Gui
+    ${PROTOBUF_LIB}
+    ${ABSL_SYNC_LIB}
+    ${ABSL_STRINGS_LIB}
+    pthread
+)
+set_target_properties(threat_assessment_calculator_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    AUTOMOC OFF
+)
+add_test(NAME threat_assessment_calculator_test COMMAND threat_assessment_calculator_test)
+
+add_executable(target_threat_proto_test
+    "${CMAKE_SOURCE_DIR}/tests/TargetThreatProtoTest.cpp"
+    "${GRPC_TARGET_THREAT_GEN_DIR}/target_threat_query.pb.cc"
+    "${GRPC_ALARM_GEN_DIR}/alarm_service.pb.cc"
+)
+target_include_directories(target_threat_proto_test PRIVATE
+    "${GRPC_TARGET_THREAT_GEN_DIR}"
+    "${GRPC_ALARM_GEN_DIR}"
+    "${GRPC_ROOT}/include"
+)
+target_link_libraries(target_threat_proto_test PRIVATE
+    ${PROTOBUF_LIB}
+    ${ABSL_SYNC_LIB}
+    ${ABSL_STRINGS_LIB}
+    pthread
+)
+set_target_properties(target_threat_proto_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    AUTOMOC OFF
+)
+add_test(NAME target_threat_proto_test COMMAND target_threat_proto_test)
 
 add_executable(alarm_content_builder_test
     "${CMAKE_SOURCE_DIR}/tests/AlarmContentBuilderTest.cpp"

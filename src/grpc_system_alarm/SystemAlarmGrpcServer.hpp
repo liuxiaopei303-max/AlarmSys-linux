@@ -9,6 +9,14 @@
 
 #include "SystemAlarmServiceImpl.hpp"
 
+class CustomConfig;
+
+namespace alarmsys {
+namespace grpc_target_threat {
+class TargetThreatQueryServiceImpl;
+}
+}
+
 namespace alarmsys {
 namespace grpc_system_alarm {
 
@@ -21,7 +29,7 @@ public:
     SystemAlarmGrpcServer(const SystemAlarmGrpcServer&) = delete;
     SystemAlarmGrpcServer& operator=(const SystemAlarmGrpcServer&) = delete;
 
-    bool start(const std::string& listen_host, int port);
+    bool start(const std::string& listen_host, int port, CustomConfig* config);
     void stop();
     bool isRunning() const { return m_running.load(); }
 
@@ -30,6 +38,7 @@ private:
 
     std::unique_ptr<::grpc::Server> m_server;
     std::unique_ptr<SystemAlarmServiceImpl> m_service;
+    std::unique_ptr<grpc_target_threat::TargetThreatQueryServiceImpl> m_targetThreatService;
     std::thread m_thread;
     std::atomic<bool> m_running{false};
     std::string m_address;

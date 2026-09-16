@@ -1,5 +1,7 @@
 #include "SystemAlarmGrpcServer.hpp"
 
+#include "grpc_target_threat/TargetThreatQueryServiceImpl.hpp"
+
 #include <QDebug>
 
 namespace alarmsys {
@@ -12,7 +14,8 @@ SystemAlarmGrpcServer::~SystemAlarmGrpcServer()
     stop();
 }
 
-bool SystemAlarmGrpcServer::start(const std::string& listen_host, int port)
+bool SystemAlarmGrpcServer::start(
+    const std::string& listen_host, int port, CustomConfig* config)
 {
     if (m_running.load()) {
         qWarning() << "SystemAlarmGrpcServer 已在运行:" << QString::fromStdString(m_address);
@@ -27,12 +30,16 @@ bool SystemAlarmGrpcServer::start(const std::string& listen_host, int port)
     m_address = host + ":" + std::to_string(port);
 
     m_service = std::make_unique<SystemAlarmServiceImpl>();
+    m_targetThreatService =
+        std::make_unique<grpc_target_threat::TargetThreatQueryServiceImpl>(config);
     ::grpc::ServerBuilder builder;
     builder.AddListeningPort(m_address, ::grpc::InsecureServerCredentials());
     builder.RegisterService(m_service.get());
+    builder.RegisterService(m_targetThreatService.get());
     m_server = builder.BuildAndStart();
     if (!m_server) {
         qWarning() << "SystemAlarmGrpcServer 启动失败:" << QString::fromStdString(m_address);
+        m_targetThreatService.reset();
         m_service.reset();
         return false;
     }
@@ -40,7 +47,7 @@ bool SystemAlarmGrpcServer::start(const std::string& listen_host, int port)
     m_running.store(true);
     m_thread = std::thread([this]() { runWait(); });
     qInfo() << "SystemAlarmGrpcServer 已监听" << QString::fromStdString(m_address)
-            << "(ReportAlarm/CancelAlarm/GetActiveAlarms)";
+            << "(ReportAlarm/CancelAlarm/GetActiveAlarms/GetTargetThreat)";
     return true;
 }
 
@@ -61,6 +68,7 @@ void SystemAlarmGrpcServer::stop()
         m_thread.join();
     }
     m_server.reset();
+    m_targetThreatService.reset();
     m_service.reset();
     m_running.store(false);
 }

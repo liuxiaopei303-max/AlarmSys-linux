@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package alarmsys.grpc.target_threat.v1;
+
+import "alarm_service.proto";
+
+// 查询业务状态。参数格式错误和服务内部错误使用标准 gRPC status；
+// “目标不存在”和“目标不在警戒区”是正常业务结果，RPC status 仍为 OK。
+enum QueryStatus {
+  QUERY_STATUS_UNSPECIFIED = 0;
+  QUERY_OK = 1;
+  TARGET_NOT_FOUND = 2;
+  OUTSIDE_MONITORED_AREA = 3;
+}
+
+enum ThreatGrade {
+  THREAT_GRADE_UNSPECIFIED = 0;
+  NO_THREAT = 1;
+  LOW_THREAT = 2;
+  MEDIUM_THREAT = 3;
+  HIGH_THREAT = 4;
+}
+
+enum DirectionBasis {
+  DIRECTION_BASIS_UNSPECIFIED = 0;
+  COURSE = 1;
+  ATTACK_ANGLE = 2;
+}
+
+enum DistanceBasis {
+  DISTANCE_BASIS_UNSPECIFIED = 0;
+  PROTECTION_AREA = 1;
+  BASE_POINT = 2;
+  TRACK_RANGE = 3;
+}
+
+// 每个分项同时给出原始分、权重和对总分的实际贡献。
+message ThreatScoreComponent {
+  double raw_score = 1;       // 0~10
+  double weight = 2;          // 0~1
+  double weighted_score = 3;  // 0~100
+}
+
+message ThreatAssessment {
+  int32 group_id = 1;
+  int32 area_id = 2;
+  string area_name = 3;
+  string rule_id = 4;
+  int32 area_level = 5;  // 当前规则的 alarm_level；2=预警区，3=告警区
+
+  double total_score = 6;  // 0~100
+  ThreatGrade grade = 7;
+  string description = 8;
+
+  ThreatScoreComponent type_score = 9;
+  ThreatScoreComponent speed_score = 10;
+  ThreatScoreComponent direction_score = 11;
+  ThreatScoreComponent distance_score = 12;
+
+  DirectionBasis direction_basis = 13;
+  double direction_angle_deg = 14;
+  DistanceBasis distance_basis = 15;
+  double distance_m = 16;
+
+  string protection_reference_source = 17;
+  trackmanager.grpc.alarm.GeoPosition protection_reference_position = 18;
+  double protection_radius_m = 19;
+  double evaluated_time = 20;
+}
+
+message TargetThreatResult {
+  trackmanager.grpc.alarm.EnvironmentType environment = 1;
+  QueryStatus status = 2;
+  string message = 3;
+
+  trackmanager.grpc.alarm.GeoPosition position = 4;
+  double speed_mps = 5;
+  double course_deg = 6;
+  string target_type = 7;
+  double target_update_time = 8;
+
+  // 目标在当前启用警戒/告警区域内时设置。
+  ThreatAssessment assessment = 9;
+
+  // 目标当前有告警时设置；类型与现有 UpdateAlarmSnapshot 完全相同。
+  trackmanager.grpc.alarm.AlarmItem current_alarm = 10;
+}
+
+message GetTargetThreatRequest {
+  // AlarmSys/TrackManager 使用的目标唯一 ID，正整数的十进制字符串。
+  // target_id 在海面和空中目标之间全局唯一。
+  string target_id = 1;
+}
+
+message GetTargetThreatResponse {
+  QueryStatus status = 1;
+  string message = 2;
+  string target_id = 3;
+
+  // 找到实时目标时设置；environment 由 AlarmSys 自动识别。
+  TargetThreatResult result = 4;
+  double response_time = 5;
+}
+
+service TargetThreatQueryService {
+  rpc GetTargetThreat(GetTargetThreatRequest) returns (GetTargetThreatResponse);
+}

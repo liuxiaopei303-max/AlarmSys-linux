@@ -3,6 +3,7 @@
 #include "AirAlarmEligibility.h"
 #include "AlarmContentBuilder.h"
 #include "AlarmFileLogger.h"
+#include "ThreatAssessmentCalculator.h"
 #include "NoAlarmAreaPolicy.h"
 #include "alarm_geoproj.h"
 #include "grpc_alarm/AlarmGrpcSnapshotMapping.h"
@@ -5173,130 +5174,17 @@ int TrackAlarmThread::convertTargetTypeStringToBitmask(const QString& targetType
 
 ThreatAssessmentResult TrackAlarmThread::calculateThreatAssessment(const SPxPacketTrackExtended& track, const DataAccessLayer::DetectionTypeResult& detectionResult, const ThreatAssessmentParams& threatParams, bool hasProtectArea, const QPointF& protectCenter, double entryAngle)
 {
-	ThreatAssessmentResult result;
-
-	// 1. 根据检测结果确定目标类型评分。认知结果优先；无认知结果时，仅信任
-	// 统一航迹转换层带签名保留的明确分类（以及原有无人机 reserved1 语义）。
-	QString finalTargetType = NewTrackStructGrpcConvert::resolveTargetTypeForScoring(
-		detectionResult.finalTargetType, track);
-	if (!finalTargetType.isEmpty()) {
-		if (finalTargetType == "speedboat" || finalTargetType == "yacht") {
-			result.targetTypeScore = threatParams.seaSpeedboatScore;
-		}
-		else if (finalTargetType == "warship") {
-			result.targetTypeScore = threatParams.seaWarshipScore;
-		}
-		else if (finalTargetType == "motorboat") {
-			result.targetTypeScore = threatParams.seaMotorboatScore;
-		}
-		else if (finalTargetType == "fishingboat") {
-			result.targetTypeScore = threatParams.seaFishingBoatScore;
-		}
-		else if (finalTargetType == "ship") {
-			result.targetTypeScore = threatParams.seaShipScore;
-		}
-		else if (finalTargetType == "cargoship") {
-			result.targetTypeScore = threatParams.seaCargoShipScore;
-		}
-		else if (finalTargetType == "buoy") {
-			result.targetTypeScore = threatParams.seaBuoyScore;
-		}
-		else if (finalTargetType == "uav" || finalTargetType == "drone") {
-			result.targetTypeScore = threatParams.airDroneScore;
-		}
-		else if (finalTargetType == "drone_swarm") {
-			result.targetTypeScore = threatParams.airDroneSwarmScore;
-		}
-		else if (finalTargetType == "compound_wing") {
-			result.targetTypeScore = threatParams.airCompoundWingScore;
-		}
-		else if (finalTargetType == "rotorcraft") {
-			result.targetTypeScore = threatParams.airRotorcraftScore;
-		}
-		else if (finalTargetType == "aircraft") {
-			result.targetTypeScore = threatParams.airAircraftScore;
-		}
-		else if (finalTargetType == "bird") {
-			result.targetTypeScore = threatParams.airBirdScore;
-		}
-		else if (finalTargetType == "bird_flock") {
-			result.targetTypeScore = threatParams.airBirdFlockScore;
-		}
-		else {
-			result.targetTypeScore = threatParams.seaUnknownScore;
-		}
-	}
-
-	// 2. 计算速度评分
-	double speed = track.norm.min.speedMps;
-	if (speed < threatParams.speedThresholdLow) {
-		result.speedScore = 0.0;
-	}
-	else if (speed <= threatParams.speedThresholdHigh) {
-		result.speedScore = (speed - threatParams.speedThresholdLow) / (threatParams.speedThresholdHigh - threatParams.speedThresholdLow) * 10.0;
-	}
-	else {
-		result.speedScore = 10.0;
-	}
-
-	// 3. 计算距离评分（基于保护区）
-	if (hasProtectArea) {
-		double distanceToProtectCenter = CommonFunc::GetDistance(track.longDegs, track.latDegs, protectCenter.y(), protectCenter.x());
-		if (distanceToProtectCenter > 0 && threatParams.maxEffectiveDistance > 0) {
-			result.distanceScore = std::max(0.0, (threatParams.maxEffectiveDistance - distanceToProtectCenter) / threatParams.maxEffectiveDistance * 10.0);
-		}
-	}
-	else {
-		double distance = 0.0;
-		if (gConfig->m_struBasicConfig.m_nUseBasePoint == 1) {
-			distance = CommonFunc::GetDistance(track.longDegs, track.latDegs,
-				gConfig->m_struBasicConfig.m_dBasePointLon, gConfig->m_struBasicConfig.m_dBasePointLat);
-		}
-		else {
-			distance = track.norm.min.rangeMetres;
-		}
-		if (distance > 0 && threatParams.maxEffectiveDistance > 0) {
-			result.distanceScore = std::max(0.0, (threatParams.maxEffectiveDistance - distance) / threatParams.maxEffectiveDistance * 10.0);
-		}
-	}
-
-	// 4. 计算能力评分（基于进入角/航向，浮标为0）
-	if (finalTargetType == "buoy") {
-		result.capabilityScore = 0.0;
-	}
-	else if (hasProtectArea) {
-		result.capabilityScore = abs((180.0 - entryAngle) / 180.0 * 10.0);
-	}
-	else {
-		double courseDegrees = track.norm.min.courseDegrees;
-		result.capabilityScore = abs((180.0 - courseDegrees) / 180.0 * 10.0);
-	}
-
-	// 5. 根据权重计算总威胁度（0~100）；单项亦输出加权后贡献分
-	result.weightedTypeScore = result.targetTypeScore * threatParams.typeWeight / 10.0 * 100.0;
-	result.weightedAngleScore = result.capabilityScore * threatParams.angleWeight / 10.0 * 100.0;
-	result.weightedSpeedScore = result.speedScore * threatParams.speedWeight / 10.0 * 100.0;
-	result.weightedDistanceScore = result.distanceScore * threatParams.distanceWeight / 10.0 * 100.0;
-
-	double totalThreatLevel =
-		result.weightedTypeScore + result.weightedAngleScore
-		+ result.weightedSpeedScore + result.weightedDistanceScore;
-
-	if (totalThreatLevel < 0.0) totalThreatLevel = 0.0;
-	if (totalThreatLevel > 100.0) totalThreatLevel = 100.0;
-	result.totalThreatLevel = totalThreatLevel;
-
-	if (totalThreatLevel >= 70.0) {
-		result.threatDescription = QStringLiteral("高威胁");
-	} else if (totalThreatLevel >= 30.0) {
-		result.threatDescription = QStringLiteral("中威胁");
-	} else if (totalThreatLevel > 0.0) {
-		result.threatDescription = QStringLiteral("低威胁");
-	} else {
-		result.threatDescription = QStringLiteral("无威胁");
-	}
-
-	return result;
+	ThreatAssessmentContext context;
+	context.hasProtectArea = hasProtectArea;
+	context.protectCenter = protectCenter;
+	context.directionAngleDeg = hasProtectArea
+		? entryAngle : track.norm.min.courseDegrees;
+	context.useBasePoint = gConfig->m_struBasicConfig.m_nUseBasePoint == 1;
+	context.basePoint = QPointF(
+		gConfig->m_struBasicConfig.m_dBasePointLat,
+		gConfig->m_struBasicConfig.m_dBasePointLon);
+	return calculateTargetThreatAssessment(
+		track, detectionResult.finalTargetType, threatParams, context).assessment;
 }
 
 double TrackAlarmThread::calculateThreatLevel(const SPxPacketTrackExtended& track, const DataAccessLayer::DetectionTypeResult& detectionResult, const ThreatAssessmentParams& threatParams, bool hasProtectArea, const QPointF& protectCenter, double entryAngle)

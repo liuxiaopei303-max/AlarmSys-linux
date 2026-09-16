@@ -19,6 +19,9 @@ public:
     void configure(const std::string& host, int port, bool enabled, const std::string& producerId);
     bool isEnabled() const { return m_enabled; }
 
+    /** 构造与 UpdateAlarmSnapshot 完全相同的当前全量快照，不执行网络调用。 */
+    trackmanager::grpc::alarm::AlarmSnapshotRequest buildCurrentSnapshot(CustomConfig* cfg) const;
+
     /** 从 CustomConfig 组装快照并推送；无有效告警时发送空 items */
     bool pushSnapshot(CustomConfig* cfg);
 

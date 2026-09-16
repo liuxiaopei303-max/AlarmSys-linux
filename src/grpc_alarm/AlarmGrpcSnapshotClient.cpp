@@ -279,16 +279,12 @@ bool AlarmGrpcSnapshotClient::ensureChannel()
     return true;
 }
 
-bool AlarmGrpcSnapshotClient::pushSnapshot(CustomConfig* cfg)
+AlarmSnapshotRequest AlarmGrpcSnapshotClient::buildCurrentSnapshot(CustomConfig* cfg) const
 {
-    if (!m_enabled || cfg == nullptr) {
-        return false;
-    }
-    if (!ensureChannel()) {
-        return false;
-    }
-
     AlarmSnapshotRequest request;
+    if (cfg == nullptr) {
+        return request;
+    }
     const double nowSec = static_cast<double>(QDateTime::currentDateTime().toSecsSinceEpoch());
     QMap<SnapshotKey, TargetAlarmRecord> dedup;
 
@@ -468,6 +464,19 @@ bool AlarmGrpcSnapshotClient::pushSnapshot(CustomConfig* cfg)
         *request.add_items() = record;
     }
 
+    return request;
+}
+
+bool AlarmGrpcSnapshotClient::pushSnapshot(CustomConfig* cfg)
+{
+    if (!m_enabled || cfg == nullptr) {
+        return false;
+    }
+    if (!ensureChannel()) {
+        return false;
+    }
+
+    const AlarmSnapshotRequest request = buildCurrentSnapshot(cfg);
     logGrpcSnapshotRequest(request);
 
     grpc::ClientContext context;

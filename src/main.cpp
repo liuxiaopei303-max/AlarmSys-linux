@@ -72,7 +72,9 @@ int main(int argc, char* argv[])
     alarmsys::grpc_system_alarm::SystemAlarmGrpcServer systemAlarmServer;
     if (cfg->m_systemAlarmGrpcEnabled) {
         if (!systemAlarmServer.start(
-                cfg->m_systemAlarmGrpcListen.toStdString(), cfg->m_systemAlarmGrpcPort)) {
+                cfg->m_systemAlarmGrpcListen.toStdString(),
+                cfg->m_systemAlarmGrpcPort,
+                cfg)) {
             qWarning() << "SystemAlarm gRPC 未启动，进程仍运行其它逻辑";
         }
     } else {
