@@ -250,14 +250,9 @@ ThreatAssessmentParams threatParamsFor(
 AreaEscalationProtectionResolver::Context resolveProtection(
     const QueryConfigSnapshot& config,
     const QMap<QString, RuntimeArea>& areas,
-    const AlarmRule& rule,
-    alarm_proto::EnvironmentType environment)
+    const AlarmRule& rule)
 {
     AreaEscalationProtectionResolver::Request request;
-    request.config = config.areaEscalation;
-    request.activeSchemeId = config.activeSchemeId;
-    request.targetDomain = environment == alarm_proto::AIR
-        ? QStringLiteral("AIR") : QStringLiteral("SURFACE");
 
     const QString areaKey = QStringLiteral("%1_%2").arg(rule.group_id).arg(rule.area_id);
     const auto protectIt = config.protectAreas.constFind(areaKey);
@@ -467,7 +462,7 @@ void TargetThreatQueryEngine::query(
         candidate.rule = rule;
         candidate.areaName = areaIt.value().source.areaName;
         candidate.params = threatParamsFor(config, rule.group_id, rule.area_id);
-        candidate.protection = resolveProtection(config, areas, rule, hit.environment);
+        candidate.protection = resolveProtection(config, areas, rule);
 
         ThreatAssessmentContext context;
         context.hasProtectArea = candidate.protection.available;

@@ -1,4 +1,5 @@
 #include "dialog/alarm/AreaEscalationEvaluator.h"
+#include "dialog/alarm/DemoRecognitionMatcher.h"
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -669,6 +670,138 @@ void singleRolePolicyTests()
               && opticResult.reason == QStringLiteral("optic"));
 }
 
+void demoSchemeIsolationTests()
+{
+    Evaluator e;
+    auto demo = pair(rect(16, 0, 0, 10, 10), rect(11, 4, 4, 6, 6));
+    demo.demoParallelUpgrade = true;
+    CHECK("演示方案嵌套区域配置可启用", e.reset(demo));
+    CHECK("B区初见不产生A区预警",
+          e.evaluateCycle({target(QPointF(5, 5), 60, 0)}, 1000).isEmpty());
+    e.reset(demo);
+    const auto warning = one(e.evaluateCycle({target(QPointF(1, 1), 60, 0)}, 1000));
+    CHECK("先在A区得到MEDIUM", warning.stage == Evaluator::Stage::Prewarning);
+    auto recognized = target(QPointF(5, 5), 0, 0);
+    recognized.alarm.recognitionMatched = true;
+    recognized.alarm.hard.speed = false;
+    recognized.alarm.hard.height = false;
+    const auto upgraded = one(e.evaluateCycle({recognized}, 1100));
+    CHECK("已有MEDIUM进入B后识别独立升级HIGH",
+          upgraded.stage == Evaluator::Stage::Alarm
+              && upgraded.reason == QStringLiteral("identification"));
+
+    e.reset(demo);
+    e.evaluateCycle({target(QPointF(1, 1), 20, 0)}, 1000);
+    const auto low = one(e.evaluateCycle({recognized}, 1100));
+    CHECK("仅LOW不得通过识别升级", low.stage == Evaluator::Stage::Threat);
+
+    e.reset(demo);
+    e.evaluateCycle({target(QPointF(1, 1), 60, 0)}, 1000);
+    auto entryOnly = target(QPointF(5, 5), 0, 60);
+    entryOnly.laneId = QStringLiteral("legacy");
+    entryOnly.observations = {
+        observation({3, 16}, Evaluator::AreaRole::Warning, 0, QStringLiteral("rule-A")),
+        observation({3, 11}, Evaluator::AreaRole::Alarm, 60, QStringLiteral("rule-B")),
+    };
+    entryOnly.observations[1].entryOnly = true;
+    entryOnly.observations[1].evidence.opticSeen = true;
+    entryOnly.observations[1].evidence.hard.speed = false;
+    const auto failedEntry = one(e.evaluateCycle({entryOnly}, 1100));
+    entryOnly.observations[1].evidence.hard.speed = true;
+    const auto late = one(e.evaluateCycle({entryOnly}, 9000));
+    CHECK("B1进入时条件失败不得以光电或停留补告",
+          failedEntry.stage == Evaluator::Stage::Prewarning
+              && late.stage == Evaluator::Stage::Prewarning);
+
+    // 关闭方案标记，保持原方案的 B 区初见预警及升级口径。
+    demo.demoParallelUpgrade = false;
+    e.reset(demo);
+    CHECK("旧方案嵌套区域仍沿用原逻辑",
+          one(e.evaluateCycle({target(QPointF(5, 5), 60, 0)}, 1000)).stage
+              == Evaluator::Stage::Prewarning);
+}
+
+void demoParallelAirRuleTests()
+{
+    Evaluator::PolicyDefinition demo;
+    demo.enabled = true;
+    demo.demoParallelUpgrade = true;
+    demo.dwellMs = 7000;
+    demo.warningAreas = {rect(16, 0, 0, 10, 10)};
+    demo.alarmAreas = {rect(11, 4, 4, 6, 6)};
+
+    auto air = [](const QPointF& point, int warningScore, int b1Score,
+                  int b2Score, bool b2Age, bool photo) {
+        Evaluator::TargetSnapshot snapshot;
+        snapshot.targetId = 5001;
+        snapshot.domain = Evaluator::TargetDomain::Air;
+        snapshot.laneId = QStringLiteral("air-demo");
+        snapshot.position = point;
+        auto a = observation({3, 16}, Evaluator::AreaRole::Warning,
+                             warningScore, QStringLiteral("air-A"));
+        auto b1 = observation({3, 11}, Evaluator::AreaRole::Alarm,
+                              b1Score, QStringLiteral("air-B1"));
+        auto b2 = observation({3, 11}, Evaluator::AreaRole::Alarm,
+                              b2Score, QStringLiteral("air-B2"));
+        for (auto* rule : {&a, &b1, &b2}) rule->trackType = 3;
+        b1.evidence.hard.speed = false;
+        b2.evidence.hard.trackAge = b2Age;
+        b2.evidence.hard.opticRequired = photo;
+        b2.evidence.opticSeen = photo;
+        b2.ignoreThreatScore = true;
+        snapshot.observations = {a, b1, b2};
+        return snapshot;
+    };
+    Evaluator e;
+    CHECK("同一B区双对空规则可配置", e.reset(demo));
+    const auto warning = one(e.evaluateCycle({air(QPointF(1, 1), 60, 0, 0, false, false)}, 1000));
+    CHECK("A区独立预警", warning.stage == Evaluator::Stage::Prewarning);
+    const auto tooYoung = one(e.evaluateCycle({air(QPointF(5, 5), 0, 0, 0, false, true)}, 1100));
+    CHECK("B2有图片但不足5秒不得告警", tooYoung.stage == Evaluator::Stage::Prewarning);
+    const auto noPhoto = one(e.evaluateCycle({air(QPointF(5, 5), 0, 0, 0, true, false)}, 1200));
+    CHECK("B2足5秒但无图片不得告警", noPhoto.stage == Evaluator::Stage::Prewarning);
+    const auto photo = one(e.evaluateCycle({air(QPointF(5, 5), 0, 0, 0, true, true)}, 1300));
+    CHECK("B2年龄及图片齐备不受威胁分限制",
+          photo.stage == Evaluator::Stage::Alarm
+              && photo.reason == QStringLiteral("optic")
+              && photo.conditionId == QStringLiteral("air-B2"));
+}
+
+void demoRecognitionCriteriaTests()
+{
+    QMap<QString, QList<AlarmIdentificationRuleSub>> rules;
+    auto criterion = [](int type, const QString& json) {
+        AlarmIdentificationRuleSub row;
+        row.enabled = true;
+        row.rule_type = type;
+        row.detection_rules_json = json;
+        return row;
+    };
+    rules.insert(QStringLiteral("sea"), {
+        criterion(3, QStringLiteral("{\"track_duration\":7}")),
+        criterion(3, QStringLiteral("{\"optic\":true}")),
+    });
+    rules.insert(QStringLiteral("air-age"), {
+        criterion(2, QStringLiteral("{\"track_duration\":10}")),
+    });
+    rules.insert(QStringLiteral("air-photo"), {
+        criterion(2, QStringLiteral("{\"track_duration\":5}")),
+        criterion(2, QStringLiteral("{\"optic\":true}")),
+    });
+    const QStringList sea{QStringLiteral("sea")};
+    const QStringList air{QStringLiteral("air-age"), QStringLiteral("air-photo")};
+    CHECK("对海年龄严格大于7且有图",
+          matchingDemoRecognitionRule(sea, rules, 3, 7, true).isEmpty()
+              && matchingDemoRecognitionRule(sea, rules, 3, 8, false).isEmpty()
+              && matchingDemoRecognitionRule(sea, rules, 3, 8, true) == QStringLiteral("sea"));
+    CHECK("对空两条规则或关系，各规则内部且关系",
+          matchingDemoRecognitionRule(air, rules, 2, 6, false).isEmpty()
+              && matchingDemoRecognitionRule(air, rules, 2, 6, true) == QStringLiteral("air-photo")
+              && matchingDemoRecognitionRule(air, rules, 2, 11, false) == QStringLiteral("air-age"));
+    CHECK("识别规则海空隔离",
+          matchingDemoRecognitionRule(sea, rules, 2, 11, true).isEmpty());
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -684,6 +817,9 @@ int main(int argc, char** argv)
     multiAreaAnyToAnyTests();
     singleRolePolicyTests();
     archiveVisitTests();
+    demoSchemeIsolationTests();
+    demoParallelAirRuleTests();
+    demoRecognitionCriteriaTests();
     qInfo() << "AreaEscalationEvaluator tests completed, failures=" << failures;
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

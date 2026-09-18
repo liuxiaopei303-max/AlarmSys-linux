@@ -175,6 +175,25 @@ target_link_libraries(alarmsys PRIVATE
 )
 
 enable_testing()
+add_executable(alarm_rule_boolean_test
+    "${CMAKE_SOURCE_DIR}/tests/AlarmRuleBooleanTest.cpp")
+target_include_directories(alarm_rule_boolean_test PRIVATE "${ALARM_SRC_DIR}")
+target_link_libraries(alarm_rule_boolean_test PRIVATE Qt5::Core Qt5::Sql)
+set_target_properties(alarm_rule_boolean_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests" AUTOMOC OFF)
+add_test(NAME alarm_rule_boolean_test COMMAND alarm_rule_boolean_test)
+
+add_executable(alarm_motion_conditions_test
+    "${CMAKE_SOURCE_DIR}/tests/AlarmMotionConditionsTest.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationEvaluator.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationProtectionResolver.cpp")
+target_include_directories(alarm_motion_conditions_test PRIVATE "${ALARM_SRC_DIR}")
+target_link_libraries(alarm_motion_conditions_test PRIVATE
+    Qt5::Core Qt5::Gui Qt5::Sql Qt5::Concurrent Qt5::Network Qt5::Widgets)
+set_target_properties(alarm_motion_conditions_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests" AUTOMOC OFF)
+add_test(NAME alarm_motion_conditions_test COMMAND alarm_motion_conditions_test)
+
 add_executable(area_escalation_evaluator_test
     "${CMAKE_SOURCE_DIR}/tests/AreaEscalationEvaluatorTest.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationEvaluator.cpp"
@@ -325,6 +344,7 @@ add_test(NAME alarm_http_snapshot_publisher_test COMMAND alarm_http_snapshot_pub
 add_executable(new_track_struct_routing_test
     "${CMAKE_SOURCE_DIR}/tests/NewTrackStructRoutingTest.cpp"
     "${ALARM_SRC_DIR}/grpc_track/new_track_struct_grpc_convert.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AirAlarmEligibility.cpp"
     "${GRPC_NEW_TRACK_STRUCT_GEN_DIR}/target_stream.pb.cc"
 )
 target_include_directories(new_track_struct_routing_test PRIVATE

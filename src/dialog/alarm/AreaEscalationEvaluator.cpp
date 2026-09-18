@@ -189,13 +189,15 @@ bool AreaEscalationEvaluator::PairDefinition::isValid(QString* error) const
 
 bool AreaEscalationEvaluator::HardConditions::allPassed() const
 {
-    return speed && speedDoubleCheck && height && entryAngle && targetType
+    return speed && speedDoubleCheck && height && entryAngle && heading && angleDuration
+        && trackAge && opticRequired && targetType
         && targetAttributes && protectDistance && entryTime;
 }
 
 bool AreaEscalationEvaluator::HardConditions::allExceptSpeedDoubleCheck() const
 {
-    return speed && height && entryAngle && targetType && targetAttributes
+    return speed && height && entryAngle && heading && angleDuration && trackAge
+        && opticRequired && targetType && targetAttributes
         && protectDistance && entryTime;
 }
 
@@ -213,7 +215,10 @@ QString AreaEscalationEvaluator::HardConditions::summary() const
         .arg(detection ? 1 : 0)
         .arg(protectDistance ? 1 : 0)
         .arg(entryTime ? 1 : 0)
-        .arg(failure);
+        .arg(failure) + QStringLiteral(",heading=%1,angle_duration=%2")
+        .arg(heading ? 1 : 0).arg(angleDuration ? 1 : 0)
+        + QStringLiteral(",track_age=%1,optic_required=%2")
+            .arg(trackAge ? 1 : 0).arg(opticRequired ? 1 : 0);
 }
 
 AreaEscalationEvaluator::AreaEscalationEvaluator(Clock clock)
@@ -555,7 +560,9 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
             item.observation = observation;
             item.definition = definition;
             item.inside = contains(definition, snapshot.position);
-            const QString areaStateKey = observation.area.toString();
+            const QString areaStateKey = observation.area.toString()
+                + (m_pair.demoParallelUpgrade && observation.role == AreaRole::Alarm
+                    ? QStringLiteral("|") + observation.evidence.conditionId : QString());
             AreaTrackState& areaState = state.areas[areaStateKey];
             areaState.area = observation.area;
             areaState.role = observation.role;
@@ -587,7 +594,8 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
         const EvaluatedObservation* scoreItem = nullptr;
         for (const EvaluatedObservation& item : evaluated) {
             const AreaEvidence& evidence = item.observation.evidence;
-            if (!item.inside || !evidence.available || !evidence.hard.allPassed()) continue;
+            if (!item.inside || !evidence.available || !evidence.hard.allPassed()
+                || (m_pair.demoParallelUpgrade && insideAlarm)) continue;
             if (scoreItem == nullptr || evidence.score > scoreItem->observation.evidence.score)
                 scoreItem = &item;
         }
@@ -655,6 +663,7 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
             for (const EvaluatedObservation& item : evaluated) {
                 const AreaEvidence& evidence = item.observation.evidence;
                 if (item.observation.role != AreaRole::Warning || !item.inside
+                    || (m_pair.demoParallelUpgrade && insideAlarm)
                     || !evidence.available
                     || evidence.score < item.observation.prewarningThreshold
                     || !evidence.hard.allPassed()) {
@@ -672,9 +681,11 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
         if (allowTransitions) {
             for (const EvaluatedObservation& item : evaluated) {
                 if (item.observation.role != AreaRole::Alarm) continue;
-                const QString areaStateKey = item.observation.area.toString();
-                AreaTrackState& areaState = state.areas[areaStateKey];
                 const AreaEvidence& evidence = item.observation.evidence;
+                const QString areaStateKey = item.observation.area.toString()
+                    + (m_pair.demoParallelUpgrade
+                        ? QStringLiteral("|") + evidence.conditionId : QString());
+                AreaTrackState& areaState = state.areas[areaStateKey];
 
                 if (item.entered && evidence.available && priorQualification
                     && evidence.score >= item.observation.prewarningThreshold) {
@@ -732,7 +743,8 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
                     ? item.observation.prewarningThreshold
                     : item.observation.threatThreshold;
                 const bool highEligible = item.inside && evidence.available
-                    && evidence.score >= highThreshold
+                    && ((m_pair.demoParallelUpgrade && item.observation.ignoreThreatScore)
+                        || evidence.score >= highThreshold)
                     && evidence.hard.allPassed();
                 if (surface) {
                     if (!highEligible) {
@@ -743,7 +755,14 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
                 }
                 const qint64 dwellMs = highEligible && areaState.alarmEntryTimeMs > 0
                     ? std::max<qint64>(0, nowMs - areaState.alarmEntryTimeMs) : 0;
-                if (highEligible) {
+                if (m_pair.demoParallelUpgrade && state.stage == Stage::Prewarning
+                    && priorQualification && item.inside && evidence.available
+                    && evidence.recognitionMatched) {
+                    upgradeFrom(Stage::Alarm, Disposition::VerifySuccess,
+                                QStringLiteral("identification"), item);
+                }
+                if (highEligible && !(m_pair.demoParallelUpgrade
+                    && item.observation.entryOnly)) {
                     if (evidence.opticSeen) {
                         upgradeFrom(Stage::Alarm, Disposition::VerifySuccess,
                                     QStringLiteral("optic"), item);
@@ -783,7 +802,10 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
         }
 
         for (const EvaluatedObservation& item : evaluated) {
-            AreaTrackState& areaState = state.areas[item.observation.area.toString()];
+            const QString areaStateKey = item.observation.area.toString()
+                + (m_pair.demoParallelUpgrade && item.observation.role == AreaRole::Alarm
+                    ? QStringLiteral("|") + item.observation.evidence.conditionId : QString());
+            AreaTrackState& areaState = state.areas[areaStateKey];
             areaState.seen = true;
             areaState.inside = item.inside;
         }

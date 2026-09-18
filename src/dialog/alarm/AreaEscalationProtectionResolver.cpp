@@ -35,8 +35,6 @@ bool validCoordinates(const QPointF& point)
 QString AreaEscalationProtectionResolver::Context::sourceName() const
 {
     switch (source) {
-    case Source::ConfiguredReference:
-        return QStringLiteral("fixed_config");
     case Source::DatabaseProtectArea:
         return QStringLiteral("protect_area");
     default:
@@ -60,32 +58,7 @@ AreaEscalationProtectionResolver::resolve(const Request& request)
     context.databaseCenter = request.databaseCenter;
     context.radiusMeters = request.databaseRadiusMeters;
     context.source = Source::DatabaseProtectArea;
-
-    const QPointF configuredCenter(
-        request.config.protectionReferenceLatitude,
-        request.config.protectionReferenceLongitude);
-    if (request.config.protectionReferenceEnabled == 1
-        && request.activeSchemeId == request.config.protectionReferenceSchemeId
-        && domainMatches(request.config.protectionReferenceDomains, request.targetDomain)
-        && validCoordinates(configuredCenter)) {
-        context.center = configuredCenter;
-        context.source = Source::ConfiguredReference;
-    }
     return context;
-}
-
-bool AreaEscalationProtectionResolver::domainMatches(
-    const QString& configuredDomains,
-    const QString& targetDomain)
-{
-    const QString wanted = targetDomain.trimmed().toUpper();
-    const QStringList domains = configuredDomains.split(
-        QLatin1Char(','), QString::SkipEmptyParts);
-    for (const QString& domain : domains) {
-        if (domain.trimmed().toUpper() == wanted)
-            return true;
-    }
-    return false;
 }
 
 double AreaEscalationProtectionResolver::bearingDegrees(

@@ -63,6 +63,7 @@ public:
 
     struct PairDefinition {
         bool enabled = false;
+        bool demoParallelUpgrade = false; // only opted-in demo scheme; all legacy policies unchanged
         AreaDefinition warningArea;
         AreaDefinition alarmArea;
         /** 多区域策略；为空时兼容旧单 A/B 字段。 */
@@ -96,6 +97,10 @@ public:
         bool speedDoubleCheck = true;
         bool height = true;
         bool entryAngle = true;
+        bool heading = true;
+        bool angleDuration = true;
+        bool trackAge = true;
+        bool opticRequired = true;
         bool targetType = true;
         bool targetAttributes = true;
         // 是否存在识别结果，仅作为 optic/类型证据记录。无识别结果
@@ -116,6 +121,7 @@ public:
         HardConditions hard;
         QString conditionId;
         bool opticSeen = false;
+        bool recognitionMatched = false;
         /** 对海知识库 archive_status=true；只在 B 区作为独立 HIGH 证据。 */
         bool archiveVisitMatched = false;
         QString archiveTargetLabel;
@@ -130,6 +136,8 @@ public:
         int trackType = 0;
         int threatThreshold = 20;
         int prewarningThreshold = 60;
+        bool entryOnly = false;
+        bool ignoreThreatScore = false;
         AreaEvidence evidence;
     };
 

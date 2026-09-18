@@ -2,6 +2,7 @@
 #include "AlarmGrpcSnapshotMapping.h"
 
 #include "customconfig.h"
+#include "dialog/alarm/AirAlarmEligibility.h"
 #include "dialog/alarm/AlarmContentBuilder.h"
 #include "dialog/alarm/AlarmFileLogger.h"
 
@@ -9,6 +10,7 @@
 #include <QDebug>
 #include <QMutexLocker>
 #include <QReadLocker>
+#include <QSet>
 #include <grpcpp/grpcpp.h>
 
 #include "alarm_service.grpc.pb.h"
@@ -286,11 +288,37 @@ AlarmSnapshotRequest AlarmGrpcSnapshotClient::buildCurrentSnapshot(CustomConfig*
         return request;
     }
     const double nowSec = static_cast<double>(QDateTime::currentDateTime().toSecsSinceEpoch());
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     QMap<SnapshotKey, TargetAlarmRecord> dedup;
+
+    QSet<qint64> currentlyExcluded;
+    {
+        QReadLocker trackLocker(&cfg->m_trackDataLock);
+        for (auto it = cfg->m_mapBirdFuseTrack.constBegin(); it != cfg->m_mapBirdFuseTrack.constEnd(); ++it) {
+            const auto decision = AirAlarmEligibility::decide(it.value(), cfg->m_alarmLogic);
+            if (decision.reason == QLatin1String("bird_skip_fusion_id")) {
+                currentlyExcluded.insert(it.key());
+            }
+        }
+    }
+    QSet<qint64> excludedAirTargets;
+    {
+        QMutexLocker excludedLocker(&m_suppressedAirMutex);
+        for (qint64 id : currentlyExcluded) {
+            m_suppressedAirUntilMs.insert(id, nowMs + 600000);
+        }
+        for (auto it = m_suppressedAirUntilMs.begin(); it != m_suppressedAirUntilMs.end();) {
+            if (it.value() < nowMs) {
+                it = m_suppressedAirUntilMs.erase(it);
+            } else {
+                excludedAirTargets.insert(it.key());
+                ++it;
+            }
+        }
+    }
 
     {
         QMutexLocker locker(&cfg->m_alarmDataMutex);
-        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
 
         for (auto it = cfg->m_mapAlarmData.constBegin(); it != cfg->m_mapAlarmData.constEnd(); ++it) {
             const AlarmData& alarmData = it.value();
@@ -309,6 +337,13 @@ AlarmSnapshotRequest AlarmGrpcSnapshotClient::buildCurrentSnapshot(CustomConfig*
             }
 
             const int ruleTrackType = cfg->m_mapAlarmRule.value(alarmData.condition_id).track_type;
+            const auto eventEnvironment =
+                static_cast<AlarmTargetEnvironment>(alarmData.alarm_environment);
+            if (resolveAlarmEnvironment(eventEnvironment, ruleTrackType)
+                    == AlarmTargetEnvironment::Air
+                && excludedAirTargets.contains(static_cast<qint64>(alarmData.unique_id))) {
+                continue;
+            }
             const qint64 grpcTargetId = resolveGrpcTargetUniqueId(alarmData, cfg, ruleTrackType);
             if (grpcTargetId <= 0) {
                 AlarmFileLogger::logGrpcAlarmSnapshot(
@@ -335,8 +370,6 @@ AlarmSnapshotRequest AlarmGrpcSnapshotClient::buildCurrentSnapshot(CustomConfig*
             }
 
             SnapshotKey key;
-            const AlarmTargetEnvironment eventEnvironment =
-                static_cast<AlarmTargetEnvironment>(alarmData.alarm_environment);
             key.environment = static_cast<int>(
                 resolveAlarmEnvironment(eventEnvironment, ruleTrackType));
             key.targetId = QString::number(grpcTargetId);

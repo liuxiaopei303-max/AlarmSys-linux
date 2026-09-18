@@ -92,6 +92,23 @@ uint32_t zibaoweiTrackIdFromFusionSources(const TargetObject& t)
     return 0U;
 }
 
+uint32_t zibaoweiTrackIdFromSources(const TargetObject& t)
+{
+    for (int i = 0; i < t.sources_size(); ++i) {
+        const TargetSourceItem& src = t.sources(i);
+        const QString source = QString::fromStdString(src.entity_id()).trimmed().toLower();
+        if (source != QLatin1String("zi_bao_wei") && source != QLatin1String("zibaowei")) {
+            continue;
+        }
+        bool valid = false;
+        const uint32_t id = QString::fromStdString(src.source_track_id()).trimmed().toUInt(&valid);
+        if (valid && id > 0U && id <= static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+            return id;
+        }
+    }
+    return 0U;
+}
+
 void fillFusionTrackIds(const TargetObject& t, SPxPacketTrackExtended& out)
 {
     int idx = 0;
@@ -115,7 +132,9 @@ void fillFusionTrackIds(const TargetObject& t, SPxPacketTrackExtended& out)
     if (idx > 0) {
         out.fusion.sensors = (1U << idx) - 1U;
     }
-    const uint32_t zibaoweiId = zibaoweiTrackIdFromFusionSources(t);
+    const uint32_t topLevelId = zibaoweiTrackIdFromSources(t);
+    const uint32_t zibaoweiId = topLevelId != 0U
+        ? topLevelId : zibaoweiTrackIdFromFusionSources(t);
     if (zibaoweiId != 0U) {
         out.fusion.trackID[0] = zibaoweiId;
     }
@@ -287,6 +306,14 @@ bool targetToSpxExtended(const TargetObject& t, SPxPacketTrackExtended& out, boo
     // 勿用 last_update_time：上游常不刷新该字段，会导致 >4s/8s prune 把仍在推送的目标误删，告警中断。
     out.msgTimeSecs = static_cast<uint32_t>(QDateTime::currentDateTime().toSecsSinceEpoch());
     out.msgTimeUsecs = 0;
+    // Preserve the upstream track birth time separately from the local liveness clock.
+    double createdSeconds = t.created_time();
+    if (createdSeconds > 1.0e11) createdSeconds /= 1000.0;
+    if (std::isfinite(createdSeconds) && createdSeconds > 1.0e9
+        && createdSeconds <= static_cast<double>(out.msgTimeSecs) + 60.0) {
+        out.norm.min.reserved4 = static_cast<uint32_t>(createdSeconds);
+        out.norm.min.reserved5 = 0x444d4f41U; // DMOA: demo track origin marker
+    }
     out.norm.min.id = 0;
     if (targetId <= static_cast<qint64>(std::numeric_limits<uint32_t>::max())) {
         out.secondary.uniqueID = static_cast<uint32_t>(targetId);

@@ -1,4 +1,6 @@
 #include "TrackAlarmThread.h"
+#include "AlarmMotionConditions.h"
+#include "DemoRecognitionMatcher.h"
 #include "AlarmAreaGeometryParser.h"
 #include "AirAlarmEligibility.h"
 #include "AlarmContentBuilder.h"
@@ -13,6 +15,7 @@
 #include <QHash>
 #include <QReadLocker>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 
@@ -65,6 +68,12 @@ QPolygonF createCirclePolygon(const QPointF& center, double radius, int precisio
 }
 
 namespace {
+
+qint64 angleClockMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 void logAlarmTrace(const QString& content)
 {
@@ -1045,15 +1054,9 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 				}
 				// 2. 速度条件判断（融合航迹连续两次判定 / 其它类型单次判定，与 Windows 版一致）
 				if (info.speed_condition > 0) {
-					bool currentSpeedCheck = true; // 当前速度判定结果
-
-					// 检查当前速度是否满足条件
-					if (info.speed_condition == 1 && track.norm.min.speedMps >= info.speed) {
-						currentSpeedCheck = false; // 小于条件不满足
-					}
-					else if (info.speed_condition == 2 && track.norm.min.speedMps <= info.speed) {
-						currentSpeedCheck = false; // 大于条件不满足
-					}
+					const bool currentSpeedCheck = AlarmMotionConditions::speedPassed(
+						info.speed_condition, info.speed, info.speed_min, info.speed_max,
+						track.norm.min.speedMps);
 
 					const qint64 trackIdSpd = targetId;
 
@@ -1107,8 +1110,10 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 				bool foundAreaInfo = false;
 				AreaInfo currentAreaInfo;
 				float angleToCheck = 0.0f;
+				bool entryAnglePassed = true;
+				bool headingAnglePassed = true;
 				// 4. 航向角/进入角判断
-				if (passFilter && info.course_min != info.course_max) {
+				if ((passFilter || info.angle_duration_seconds > 0) && info.course_min != info.course_max) {
 					// 获取当前告警区域的保护区信息（从激活方案中读取）
 					QString areaKey = QString("%1_%2").arg(info.group_id).arg(info.area_id);
 					if (gConfig->m_mapSchemeProtectAreas.contains(areaKey)) {
@@ -1160,6 +1165,7 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 					if (info.course_min <= info.course_max) {
 						// 正常情况：course_min < course_max
 						if (angleToCheck < info.course_min || angleToCheck > info.course_max) {
+							entryAnglePassed = false;
 							passFilter = false;
 							failReason = QStringLiteral("course_range fail angle:%1 min:%2 max:%3")
 								.arg(angleToCheck)
@@ -1170,12 +1176,34 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 					else {
 						// 跨越0度的情况：course_min > course_max (例如：350-10度)
 						if (angleToCheck < info.course_min && angleToCheck > info.course_max) {
+							entryAnglePassed = false;
 							passFilter = false;
 							failReason = QStringLiteral("course_wrap fail angle:%1 min:%2 max:%3")
 								.arg(angleToCheck)
 								.arg(info.course_min)
 								.arg(info.course_max);
 						}
+					}
+				}
+
+				// 独立航向条件始终使用航迹原始航向，不使用保护区进入角。
+				if ((passFilter || info.angle_duration_seconds > 0) && !AlarmMotionConditions::headingPassed(
+					info.heading_min, info.heading_max, track.norm.min.courseDegrees)) {
+					headingAnglePassed = false;
+					passFilter = false;
+					failReason = QStringLiteral("heading_range fail course:%1 min:%2 max:%3")
+						.arg(track.norm.min.courseDegrees)
+						.arg(info.heading_min.value_or(-1.0))
+						.arg(info.heading_max.value_or(-1.0));
+				}
+				if (type != 2 && info.angle_duration_seconds > 0) {
+					const QString angleKey = QStringLiteral("%1|%2|%3|%4")
+						.arg(info.condition_id).arg(type).arg(radarSourceId).arg(targetId);
+					if (!m_regularAngleDuration.passed(angleKey, info.angle_duration_seconds,
+						entryAnglePassed && headingAnglePassed,
+						static_cast<qint64>(track.msgTimeSecs), angleClockMs())) {
+						passFilter = false;
+						failReason = QStringLiteral("angle_duration_pending");
 					}
 				}
 
@@ -1610,13 +1638,9 @@ bool TrackAlarmThread::findConfiguredNoAlarmArea(
 }
 
 AreaEscalationProtectionResolver::Context TrackAlarmThread::resolveProtectionContext(
-	const AlarmRule& rule,
-	AreaEscalationEvaluator::TargetDomain domain) const
+	const AlarmRule& rule) const
 {
 	AreaEscalationProtectionResolver::Request request;
-	request.config = gConfig->m_areaEscalation;
-	request.activeSchemeId = gConfig->m_activeAlarmSchemeId;
-	request.targetDomain = escalationDomainName(domain);
 
 	const QString areaKey = QStringLiteral("%1_%2").arg(rule.group_id).arg(rule.area_id);
 	if (gConfig->m_mapSchemeProtectAreas.contains(areaKey)) {
@@ -1692,6 +1716,9 @@ bool TrackAlarmThread::configureAreaEscalation(const QList<AlarmRule>& rules)
 	m_areaEscalationBindings.clear();
 	m_areaEscalationClaimedConditionIds.clear();
 	m_areaEscalationPreviousSpeed.clear();
+	m_demoFirstSeenMs.clear();
+	m_regularAngleDuration.clear();
+	m_areaAngleDuration.clear();
 
 	if (!gConfig->m_areaEscalation.enabled) {
 		AreaEscalationEvaluator::PolicyDefinition disabled;
@@ -1739,6 +1766,7 @@ bool TrackAlarmThread::configureAreaEscalation(const QList<AlarmRule>& rules)
 
 	AreaEscalationEvaluator::PolicyDefinition policy;
 	policy.enabled = true;
+	policy.demoParallelUpgrade = gConfig->m_demoParallelUpgrade;
 	policy.dwellMs = 7000;
 	QSet<QString> bindingKeys;
 	QStringList bindingDescriptions;
@@ -1772,7 +1800,9 @@ bool TrackAlarmThread::configureAreaEscalation(const QList<AlarmRule>& rules)
 				}
 				const QString bindingKey = QStringLiteral("%1|%2")
 					.arg(areaIt.key()).arg(rule.track_type);
-				if (bindingKeys.contains(bindingKey))
+				if (bindingKeys.contains(bindingKey)
+					&& !(policy.demoParallelUpgrade
+						&& role == AreaEscalationEvaluator::AreaRole::Alarm))
 					return fail(QStringLiteral("同一区域同一 track_type 只能绑定一条规则: %1")
 						.arg(bindingKey));
 				bindingKeys.insert(bindingKey);
@@ -1836,13 +1866,11 @@ AreaEscalationEvaluator::AreaEvidence TrackAlarmThread::evaluateAreaEscalationEv
 	const SPxPacketTrackExtended& track,
 	const DataAccessLayer::DetectionTypeResult& detection,
 	bool previousSpeedPassed,
-	bool insideArea)
+	bool insideArea, qint64 businessTargetId, double trackAgeSeconds)
 {
 	AreaEscalationEvaluator::AreaEvidence evidence;
 	evidence.available = insideArea;
 	evidence.conditionId = rule.condition_id;
-	if (!insideArea)
-		return evidence;
 	if (rule.track_type == 0 && detection.archiveVisit.matched) {
 		evidence.archiveVisitMatched = true;
 		evidence.archiveTargetLabel = detection.archiveVisit.targetLabel;
@@ -1857,11 +1885,8 @@ AreaEscalationEvaluator::AreaEvidence TrackAlarmThread::evaluateAreaEscalationEv
 	};
 
 	const double speed = track.norm.min.speedMps;
-	bool currentSpeedPassed = true;
-	if (rule.speed_condition == 1)
-		currentSpeedPassed = speed < rule.speed;
-	else if (rule.speed_condition == 2)
-		currentSpeedPassed = speed > rule.speed;
+	const bool currentSpeedPassed = AlarmMotionConditions::speedPassed(
+		rule.speed_condition, rule.speed, rule.speed_min, rule.speed_max, speed);
 	if (!currentSpeedPassed)
 		reject(&evidence.hard.speed, QStringLiteral("speed"));
 	if (rule.speed_condition > 0 && !(previousSpeedPassed && currentSpeedPassed))
@@ -1872,11 +1897,8 @@ AreaEscalationEvaluator::AreaEvidence TrackAlarmThread::evaluateAreaEscalationEv
 		reject(&evidence.hard.height, QStringLiteral("height"));
 	}
 
-	const AreaEscalationEvaluator::TargetDomain targetDomain = rule.track_type == 3
-		? AreaEscalationEvaluator::TargetDomain::Air
-		: AreaEscalationEvaluator::TargetDomain::Surface;
 	const AreaEscalationProtectionResolver::Context protection =
-		resolveProtectionContext(rule, targetDomain);
+		resolveProtectionContext(rule);
 	const bool hasProtectArea = protection.available;
 	const QPointF protectCenter = protection.center;
 
@@ -1894,6 +1916,26 @@ AreaEscalationEvaluator::AreaEvidence TrackAlarmThread::evaluateAreaEscalationEv
 		if (!anglePassed)
 			reject(&evidence.hard.entryAngle, QStringLiteral("entry_angle"));
 	}
+
+	if (!AlarmMotionConditions::headingPassed(
+			rule.heading_min, rule.heading_max, track.norm.min.courseDegrees)) {
+		reject(&evidence.hard.heading, QStringLiteral("heading"));
+	}
+	if (rule.track_type != 2 && rule.angle_duration_seconds > 0) {
+		const QString angleKey = QStringLiteral("%1|%2|%3|%4")
+			.arg(rule.condition_id).arg(rule.group_id).arg(rule.area_id).arg(businessTargetId);
+		if (!m_areaAngleDuration.passed(angleKey, rule.angle_duration_seconds,
+				evidence.hard.entryAngle && evidence.hard.heading,
+				static_cast<qint64>(track.msgTimeSecs), angleClockMs()))
+			reject(&evidence.hard.angleDuration, QStringLiteral("angle_duration_pending"));
+	}
+	if (gConfig->m_demoParallelUpgrade && rule.min_track_age_seconds >= 0
+		&& !(trackAgeSeconds > rule.min_track_age_seconds))
+		reject(&evidence.hard.trackAge, QStringLiteral("track_age"));
+	// Duration follows the track even before it enters this area. The rest of the
+	// area's evidence, including the score, is only usable while geometrically inside.
+	if (!insideArea)
+		return evidence;
 
 	if (rule.dist_to_protect_area >= 0 && hasProtectArea) {
 		const double centerDistance = AreaEscalationProtectionResolver::distanceMeters(
@@ -1975,6 +2017,8 @@ void TrackAlarmThread::processAreaEscalation()
 	QHash<QString, AreaEscalationEvaluator::TargetSnapshot> snapshotsByTarget;
 	QSet<AreaEscalationEvaluator::TargetKey> liveTargets;
 	QSet<QString> liveSpeedKeys;
+	QSet<QString> liveAngleKeys;
+	QSet<QString> liveDemoAgeKeys;
 	QHash<QString, DataAccessLayer::DetectionTypeResult> detectionCache;
 	QHash<QString, bool> opticCache;
 	QHash<QString, bool> noAlarmCache;
@@ -1994,6 +2038,9 @@ void TrackAlarmThread::processAreaEscalation()
 			if (targetId <= 0) continue;
 			const auto domain = binding.domain;
 			liveTargets.insert({domain, targetId});
+			const QString demoAgeKey = QStringLiteral("%1|%2")
+				.arg(static_cast<int>(domain)).arg(targetId);
+			liveDemoAgeKeys.insert(demoAgeKey);
 
 			if (gConfig->isUniqueIdAlarmFiltered(targetId)) {
 				m_areaEscalationEvaluator.clearTarget(domain, targetId);
@@ -2020,9 +2067,23 @@ void TrackAlarmThread::processAreaEscalation()
 
 			const QString targetKey = QStringLiteral("%1|%2")
 				.arg(static_cast<int>(domain)).arg(targetId);
+			const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+			if (gConfig->m_demoParallelUpgrade && !m_demoFirstSeenMs.contains(demoAgeKey))
+				m_demoFirstSeenMs.insert(demoAgeKey, nowMs);
+			const qint64 fromTrackMs = track.norm.min.reserved5 == 0x444d4f41U
+				? static_cast<qint64>(track.norm.min.reserved4) * 1000 : 0;
+			const qint64 birthMs = gConfig->m_demoParallelUpgrade
+				&& fromTrackMs > 1000000000000LL && fromTrackMs <= nowMs
+				? fromTrackMs : m_demoFirstSeenMs.value(demoAgeKey, nowMs);
+			const double ageSeconds = gConfig->m_demoParallelUpgrade
+				? std::max<qint64>(0, nowMs - birthMs) / 1000.0 : 0.0;
 			const QString speedKey = QStringLiteral("%1|%2")
 				.arg(binding.rule.condition_id).arg(targetId);
 			liveSpeedKeys.insert(speedKey);
+			if (binding.rule.track_type != 2 && binding.rule.angle_duration_seconds > 0)
+				liveAngleKeys.insert(QStringLiteral("%1|%2|%3|%4")
+					.arg(binding.rule.condition_id).arg(binding.rule.group_id)
+					.arg(binding.rule.area_id).arg(targetId));
 
 			const QPointF point(track.latDegs, track.longDegs);
 			const bool insideArea = containsCurrentPoint(binding.runtimeArea, point);
@@ -2091,8 +2152,14 @@ void TrackAlarmThread::processAreaEscalation()
 			observation.trackType = binding.trackType;
 			observation.threatThreshold = binding.rule.threat_level1;
 			observation.prewarningThreshold = binding.rule.threat_level2;
+			observation.entryOnly = gConfig->m_demoParallelUpgrade
+				&& binding.role == AreaEscalationEvaluator::AreaRole::Alarm
+				&& binding.rule.area_judge == 4;
+			observation.ignoreThreatScore = gConfig->m_demoParallelUpgrade
+				&& binding.rule.ignore_threat_score;
 			observation.evidence = evaluateAreaEscalationEvidence(
-				binding.rule, track, detection, previousSpeedPassed, insideArea);
+				binding.rule, track, detection, previousSpeedPassed, insideArea,
+				targetId, ageSeconds);
 			if (insideArea && binding.role == AreaEscalationEvaluator::AreaRole::Alarm) {
 				if (!opticCache.contains(targetKey)) {
 					opticCache.insert(targetKey,
@@ -2100,7 +2167,22 @@ void TrackAlarmThread::processAreaEscalation()
 							detectionId, QStringLiteral("%")));
 				}
 				observation.evidence.opticSeen = opticCache.value(targetKey, false);
-				if (observation.evidence.score < observation.threatThreshold
+				if (gConfig->m_demoParallelUpgrade) {
+					if (binding.rule.require_optic_photo
+						&& !observation.evidence.opticSeen) {
+						observation.evidence.hard.opticRequired = false;
+						observation.evidence.hard.failure += QStringLiteral("|optic_required");
+					}
+					const QString areaKey = QStringLiteral("%1_%2")
+						.arg(binding.rule.group_id).arg(binding.rule.area_id);
+					observation.evidence.recognitionMatched = !matchingDemoRecognitionRule(
+						gConfig->m_mapAreaKeyToIdentificationRuleIds.value(areaKey),
+						gConfig->m_mapAlarmIdentificationRulesSub,
+						domain == AreaEscalationEvaluator::TargetDomain::Air ? 2 : 3,
+						ageSeconds, observation.evidence.opticSeen).isEmpty();
+				}
+				if ((!observation.ignoreThreatScore
+					&& observation.evidence.score < observation.threatThreshold)
 					|| !observation.evidence.hard.allPassed()) {
 					logAlarmTraceThrottled(
 						QStringLiteral("area_escalation_block_%1_%2")
@@ -2122,11 +2204,9 @@ void TrackAlarmThread::processAreaEscalation()
 			snapshot.observations.append(observation);
 
 			if (insideArea) {
-				bool currentSpeedPassed = true;
-				if (binding.rule.speed_condition == 1)
-					currentSpeedPassed = track.norm.min.speedMps < binding.rule.speed;
-				else if (binding.rule.speed_condition == 2)
-					currentSpeedPassed = track.norm.min.speedMps > binding.rule.speed;
+				const bool currentSpeedPassed = AlarmMotionConditions::speedPassed(
+					binding.rule.speed_condition, binding.rule.speed,
+					binding.rule.speed_min, binding.rule.speed_max, track.norm.min.speedMps);
 				m_areaEscalationPreviousSpeed.insert(speedKey, currentSpeedPassed);
 			}
 		}
@@ -2169,6 +2249,11 @@ void TrackAlarmThread::processAreaEscalation()
 	for (auto it = m_areaEscalationPreviousSpeed.begin();
 		 it != m_areaEscalationPreviousSpeed.end();) {
 		if (!liveSpeedKeys.contains(it.key())) it = m_areaEscalationPreviousSpeed.erase(it);
+		else ++it;
+	}
+	m_areaAngleDuration.retainOnly(liveAngleKeys);
+	for (auto it = m_demoFirstSeenMs.begin(); it != m_demoFirstSeenMs.end();) {
+		if (!liveDemoAgeKeys.contains(it.key())) it = m_demoFirstSeenMs.erase(it);
 		else ++it;
 	}
 
@@ -2227,7 +2312,7 @@ void TrackAlarmThread::applyAreaEscalationResult(
 			evidenceTrack.norm.min.courseDegrees = result.courseDeg;
 			evidenceTrack.norm.min.speedMps = result.speedMps;
 			const AreaEscalationProtectionResolver::Context protection =
-				resolveProtectionContext(rule, result.domain);
+				resolveProtectionContext(rule);
 			const bool hasProtectArea = protection.available;
 			const QPointF protectCenter = protection.center;
 
@@ -2320,7 +2405,7 @@ void TrackAlarmThread::applyAreaEscalationResult(
 
 	if (result.stageChanged) {
 		const AreaEscalationProtectionResolver::Context protection =
-			resolveProtectionContext(rule, result.domain);
+			resolveProtectionContext(rule);
 		const QString log = QStringLiteral(
 			"AreaEscalation upgrade------domain:%1 lane:%2 target:%3 qualificationArea:%4/%5 eventArea:%6/%7 stage:%8 reason:%9 "
 			"qualificationTime:%10 alarmEntryTime:%11 dwellMs:%12 previous:(%13,%14) current:(%15,%16) "
@@ -2462,6 +2547,8 @@ void TrackAlarmThread::processAlarms()
 	int trailCount = 2;
 	QList< AlarmRule> waringList = gConfig->m_mapAlarmRule.values();
 	const bool areaEscalationActive = configureAreaEscalation(waringList);
+	m_regularAngleDuration.prune(angleClockMs());
+	QSet<QString> liveRegularAngleKeys;
 	if (areaEscalationActive)
 		processAreaEscalation();
 	//qDebug() << "TrackAlarmThread: processAlarms: waringList size" << waringList.size();
@@ -2476,6 +2563,53 @@ void TrackAlarmThread::processAlarms()
 		//qDebug() << "TrackAlarmThread: processAlarms: info" << info.track_type;
 		if (info.alarmstate)
 		{
+			// 区域内候选的生成晚于实时航迹更新：先对所有实时航迹观察角度，
+			// 使入区前的连续满足时间也能复用；候选阶段重复读取同一帧不会推进计时。
+			if (info.track_type != 2 && info.angle_duration_seconds > 0) {
+				QPointF protectCenter;
+				bool hasProtect = false;
+				const QString areaKey = QStringLiteral("%1_%2").arg(info.group_id).arg(info.area_id);
+				if (gConfig->m_mapSchemeProtectAreas.contains(areaKey)) {
+					const auto protectKey = gConfig->m_mapSchemeProtectAreas.value(areaKey);
+					AlarmArea protectArea;
+					if (findAlarmArea(protectKey.first, protectKey.second, &protectArea)
+						&& protectArea.m_alertAreaType == 2) {
+						hasProtect = true;
+						protectCenter = protectArea.m_startP;
+					}
+				}
+				auto observeTrackMap = [&](const auto& tracks, int type, int radarSourceId) {
+					for (auto it = tracks.constBegin(); it != tracks.constEnd(); ++it) {
+						const auto& track = it.value();
+						double angle = track.norm.min.courseDegrees;
+						if (hasProtect) {
+							const double bearing = calculateBearing(
+								track.latDegs, track.longDegs, protectCenter.x(), protectCenter.y());
+							angle = std::abs(angle - bearing);
+							if (angle > 180.0) angle = 360.0 - angle;
+						}
+						const bool entryPassed = info.course_min == info.course_max
+							|| (info.course_min <= info.course_max
+								? angle >= info.course_min && angle <= info.course_max
+								: angle >= info.course_min || angle <= info.course_max);
+						const bool anglesPassed = entryPassed && AlarmMotionConditions::headingPassed(
+							info.heading_min, info.heading_max, track.norm.min.courseDegrees);
+						const QString key = QStringLiteral("%1|%2|%3|%4")
+							.arg(info.condition_id).arg(type).arg(radarSourceId)
+							.arg(static_cast<qint64>(it.key()));
+						liveRegularAngleKeys.insert(key);
+						m_regularAngleDuration.passed(key, info.angle_duration_seconds,
+							anglesPassed, static_cast<qint64>(track.msgTimeSecs), angleClockMs());
+					}
+				};
+				if (info.track_type == 0)
+					observeTrackMap(m_mapFuseTrack, 0, 0);
+				else if (info.track_type == 1) {
+					observeTrackMap(m_mapRadarTrack, 1, 0);
+					observeTrackMap(m_mapRadarTrack, 1, 7);
+				} else if (info.track_type == 3)
+					observeTrackMap(m_mapBirdRadarTrack, 3, 9);
+			}
 			AlarmArea alertArea;
 			if (info.group_id>=0&&info.area_id>=0)
 			{
@@ -4236,6 +4370,23 @@ void TrackAlarmThread::processAlarms()
 					}
 
 				}
+				else if (info.speed_condition == 3 && info.track_type != 2)
+				{
+					// Speed-only interval rules must reach the same final filter too.
+					const auto collect = [&](const auto& tracks, const auto& trails) {
+						for (auto it = tracks.constBegin(); it != tracks.constEnd(); ++it) {
+							if (trails.value(it.key()).size() > trailCount
+								&& AlarmMotionConditions::speedPassed(3, info.speed,
+									info.speed_min, info.speed_max, it.value().norm.min.speedMps))
+								trackIdSet.insert(it.key());
+						}
+					};
+					if (info.track_type == 0) collect(m_mapFuseTrack, m_mapFuseTrail);
+					else if (info.track_type == 1) collect(m_mapRadarTrack, m_mapRadarTrail);
+					else if (info.track_type == 3) collect(m_mapBirdRadarTrack, m_mapBirdRadarTrail);
+					if (!trackIdSet.isEmpty())
+						updataAlarmTrackToDB(trackIdSet, info, info.track_type);
+				}
 				else if (info.direction == 1)//远离
 				{
 					if (info.track_type == 0)
@@ -5117,6 +5268,7 @@ void TrackAlarmThread::processAlarms()
 	}
 
 
+	m_regularAngleDuration.retainOnly(liveRegularAngleKeys);
 	//qDebug() << "2==========================" << endl;
 
 	//AlarmData newAlarm;

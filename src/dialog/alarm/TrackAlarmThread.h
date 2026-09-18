@@ -4,6 +4,7 @@
 #include "datastruct/commonStruct.h"
 #include "dialog/alarm/AreaEscalationEvaluator.h"
 #include "dialog/alarm/AreaEscalationProtectionResolver.h"
+#include "dialog/alarm/AngleDurationGate.h"
 #include"customconfig.h"
 class TrackAlarmThread : public QThread
 {
@@ -44,7 +45,8 @@ private:
         const SPxPacketTrackExtended& track,
         const DataAccessLayer::DetectionTypeResult& detection,
         bool previousSpeedPassed,
-        bool insideArea);
+        bool insideArea,
+        qint64 targetId, double trackAgeSeconds);
     void applyAreaEscalationResult(const AreaEscalationEvaluator::Result& result);
     bool findAlarmArea(int groupId, int areaId, AlarmArea* out) const;
     bool findConfiguredNoAlarmArea(
@@ -52,8 +54,7 @@ private:
     bool containsCurrentPoint(const AlarmArea& area, const QPointF& point) const;
     AreaEscalationEvaluator::AreaDefinition toEscalationArea(const AlarmArea& area) const;
     AreaEscalationProtectionResolver::Context resolveProtectionContext(
-        const AlarmRule& rule,
-        AreaEscalationEvaluator::TargetDomain domain) const;
+        const AlarmRule& rule) const;
     int m_alarmType;
     bool m_running;
     float m_uavLat;
@@ -79,6 +80,9 @@ private:
     QList<AreaEscalationBinding> m_areaEscalationBindings;
     QSet<QString> m_areaEscalationClaimedConditionIds;
     QHash<QString, bool> m_areaEscalationPreviousSpeed;
+    QHash<QString, qint64> m_demoFirstSeenMs;
+    AngleDurationGate m_regularAngleDuration;
+    AngleDurationGate m_areaAngleDuration;
     /** 单处理周期认知结果缓存；避免同一目标因多区域/多规则重复点查数据库。 */
     QHash<qint64, DataAccessLayer::DetectionTypeResult> m_cognitiveEvidenceCache;
 signals:

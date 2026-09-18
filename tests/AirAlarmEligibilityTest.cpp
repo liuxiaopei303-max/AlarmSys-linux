@@ -32,9 +32,9 @@ int main(int argc, char** argv)
 
     AlarmLogicConfig config;
     config.mode = 0;
-    config.birdSkipTrackIds = {4001, 4002, 4003, 4004, 4008, 4011};
+    config.birdSkipTrackIds = {4001, 4002, 4003, 4004, 4008, 4011, 4021};
 
-    for (int sourceId : {4001, 4002, 4003, 4004, 4011}) {
+    for (int sourceId : {4001, 4002, 4003, 4004, 4011, 4021}) {
         const auto decision = AirAlarmEligibility::decide(
             droneWithSourceId(sourceId), config);
         CHECK(QStringLiteral("自报位无人机 %1 免告警").arg(sourceId),

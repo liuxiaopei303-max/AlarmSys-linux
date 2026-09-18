@@ -1,8 +1,10 @@
 #include "grpc_track/new_track_struct_grpc_convert.h"
 #include "target_stream.pb.h"
 #include "datastruct/commonStruct.h"
+#include "dialog/alarm/AirAlarmEligibility.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDebug>
 
 namespace proto = trackmanager::grpc::new_track_struct;
@@ -76,6 +78,8 @@ int main(int argc, char** argv)
 
     proto::TargetObject selfReportedDrone = airTarget;
     selfReportedDrone.set_target_id("2900001");
+    const auto originalBirthSeconds = QDateTime::currentSecsSinceEpoch() - 12;
+    selfReportedDrone.set_created_time(originalBirthSeconds);
     auto* selfReportSource = selfReportedDrone.add_sources();
     selfReportSource->mutable_source_profile()->set_radar_source_present(true);
     auto* selfReportFusion = selfReportSource->mutable_source_profile()
@@ -93,6 +97,44 @@ int main(int argc, char** argv)
     if (NewTrackStructGrpcConvert::resolveTargetTypeForScoring(
             QString(), convertedSelfReportedDrone) != QStringLiteral("drone")) {
         qCritical() << "existing drone scoring fallback changed unexpectedly";
+        return 1;
+    }
+    if (convertedSelfReportedDrone.norm.min.reserved5 != 0x444d4f41U
+        || convertedSelfReportedDrone.norm.min.reserved4
+            != static_cast<uint32_t>(originalBirthSeconds)) {
+        qCritical() << "track origin timestamp was not preserved independently of liveness";
+        return 1;
+    }
+
+    AlarmLogicConfig skipConfig;
+    skipConfig.mode = 0;
+    skipConfig.birdSkipTrackIds = {4001, 4002, 4008, 4021};
+    for (int excludedId : {4001, 4002, 4008, 4021}) {
+        proto::TargetObject realFusion = airTarget;
+        realFusion.set_target_id("227993434");
+        auto* source = realFusion.add_sources();
+        source->set_entity_id("zi_bao_wei");
+        source->set_source_track_id(std::to_string(excludedId));
+        auto* strike = realFusion.add_sources();
+        strike->set_entity_id("udp_strike_uav_track");
+        strike->set_source_track_id("589");
+        SPxPacketTrackExtended converted;
+        if (!NewTrackStructGrpcConvert::targetToSpxExtended(realFusion, converted, true)
+            || !AirAlarmEligibility::decide(converted, skipConfig).skip) {
+            qCritical() << "top-level self-report source was not excluded"
+                        << excludedId << converted.fusion.trackID[0];
+            return 1;
+        }
+    }
+    proto::TargetObject ordinaryFusion = airTarget;
+    ordinaryFusion.set_target_id("227993435");
+    auto* ordinarySource = ordinaryFusion.add_sources();
+    ordinarySource->set_entity_id("zi_bao_wei");
+    ordinarySource->set_source_track_id("4005");
+    SPxPacketTrackExtended convertedOrdinary;
+    if (!NewTrackStructGrpcConvert::targetToSpxExtended(ordinaryFusion, convertedOrdinary, true)
+        || AirAlarmEligibility::decide(convertedOrdinary, skipConfig).skip) {
+        qCritical() << "ordinary self-report drone was excluded";
         return 1;
     }
 

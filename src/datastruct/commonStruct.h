@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 #include <QString>
 #include <QVector>
 #include <QStringList>
@@ -129,11 +130,6 @@ struct AlarmLogicConfig {
 /** 三态区域升级运行开关（Config.ini [AreaEscalation]）。 */
 struct AreaEscalationConfig {
     int enabled = 0; /**< 1=启用显式 A(alarm_level=2) / B(alarm_level=3) 三态逻辑 */
-    int protectionReferenceEnabled = 0; /**< 1=允许按方案/环境域覆盖保护计算圆心 */
-    QString protectionReferenceSchemeId; /**< 仅该激活方案使用配置参考点 */
-    QString protectionReferenceDomains = QStringLiteral("SURFACE"); /**< 逗号分隔：SURFACE/AIR */
-    double protectionReferenceLatitude = 0.0;
-    double protectionReferenceLongitude = 0.0;
 };
 
 /** 可疑目标研判（Config.ini [SuspiciousTarget]）；默认经告警快照嵌入 TargetObject.alarms */
@@ -1966,6 +1962,14 @@ struct AlarmRule {
     int track_type = 0;
     int speed_condition;
     int speed;
+    std::optional<double> speed_min;
+    std::optional<double> speed_max;
+    std::optional<double> heading_min;
+    std::optional<double> heading_max;
+    int angle_duration_seconds = 0;
+    int min_track_age_seconds = -1; // <0: disabled; enabled values use strict greater-than
+    bool require_optic_photo = false;
+    bool ignore_threat_score = false;
     int area_judge;
     int direction;
     int group_id;
@@ -2018,6 +2022,7 @@ struct AlarmRule {
 struct AlarmIdentificationRuleSub {
     int id = 0;
     QString rule_id;
+    int rule_type = 0; // 2=air, 3=surface (identification main table)
     QString criteria_id;
     int criteria_type = 0;
     int criteria_order = 1;

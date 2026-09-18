@@ -1,6 +1,8 @@
 // DataAccessLayer.cpp
 
 #include "DataAccessLayer.h"
+#include "AlarmMotionConditionValue.h"
+#include "SqlBooleanValue.h"
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QSqlQuery>
@@ -1627,6 +1629,25 @@ QMap<QString, AlarmRule> DataAccessLayer::getAlarmRule()
         p_alarmrule.track_type = result.value("track_type").toInt();
         p_alarmrule.speed_condition = result.value("speed_condition").toInt();
         p_alarmrule.speed = result.value("speed").toInt();
+        const auto optionalNumber = [&](const char* column) -> std::optional<double> {
+            return readOptionalAlarmMotionNumber(result.value(column));
+        };
+        p_alarmrule.speed_min = optionalNumber("speed_min");
+        p_alarmrule.speed_max = optionalNumber("speed_max");
+        p_alarmrule.heading_min = optionalNumber("heading_min");
+        p_alarmrule.heading_max = optionalNumber("heading_max");
+        p_alarmrule.angle_duration_seconds = result.value("angle_duration_seconds").toInt();
+        p_alarmrule.min_track_age_seconds = result.value("min_track_age_seconds").isNull()
+            ? -1 : result.value("min_track_age_seconds").toInt();
+        p_alarmrule.require_optic_photo = readSqlBooleanValue(result.value("require_optic_photo"));
+        p_alarmrule.ignore_threat_score = readSqlBooleanValue(result.value("ignore_threat_score"));
+        if (p_alarmrule.speed_condition == 3 || p_alarmrule.heading_min || p_alarmrule.heading_max) {
+            qInfo().noquote() << QStringLiteral(
+                "AlarmMotion loaded condition:%1 speedMode:%2 speedRange:[%3,%4] heading:[%5,%6]")
+                .arg(result.value("condition_id").toString()).arg(p_alarmrule.speed_condition)
+                .arg(p_alarmrule.speed_min.value_or(-1.0)).arg(p_alarmrule.speed_max.value_or(-1.0))
+                .arg(p_alarmrule.heading_min.value_or(-1.0)).arg(p_alarmrule.heading_max.value_or(-1.0));
+        }
         p_alarmrule.area_judge = result.value("area_judge").toInt();
         p_alarmrule.direction = result.value("direction").toInt();
         p_alarmrule.group_id = result.value("group_id").toInt();
@@ -1675,9 +1696,10 @@ QMap<QString, QList<AlarmIdentificationRuleSub>> DataAccessLayer::getAlarmIdenti
     QMap<QString, QList<AlarmIdentificationRuleSub>> map;
     const QString schemeId = getActiveSchemeId();
     QString query =
-        "SELECT s.id, s.rule_id, s.criteria_id, s.criteria_type, s.criteria_order, "
+        "SELECT s.id, s.rule_id, r.rule_type, s.criteria_id, s.criteria_type, s.criteria_order, "
         "s.detection_rules, s.logic_operator, s.enabled, s.created_at, s.updated_at "
         "FROM alarm_identification_rules_sub s "
+        "JOIN alarm_identification_rules r ON r.rule_id = s.rule_id AND r.enabled = true "
         "WHERE EXISTS ("
         "  SELECT 1 FROM area_identification_rules a "
         "  WHERE a.rule_id = s.rule_id AND a.scheme_id = ? AND COALESCE(a.enabled, true) = true"
@@ -1688,6 +1710,7 @@ QMap<QString, QList<AlarmIdentificationRuleSub>> DataAccessLayer::getAlarmIdenti
         AlarmIdentificationRuleSub row;
         row.id = result.value("id").toInt();
         row.rule_id = result.value("rule_id").toString();
+        row.rule_type = result.value("rule_type").toInt();
         row.criteria_id = result.value("criteria_id").toString();
         row.criteria_type = result.value("criteria_type").toInt();
         row.criteria_order = result.value("criteria_order").toInt();
@@ -1857,6 +1880,15 @@ QString DataAccessLayer::getActiveSchemeId()
     }
     qDebug() << "未找到活跃的告警方案，使用默认scheme_id";
     return "default";
+}
+
+bool DataAccessLayer::getDemoParallelUpgrade(const QString& schemeId)
+{
+    const QSqlQuery result = m_dbManager.executeQuery(
+        QStringLiteral("SELECT COALESCE(demo_parallel_upgrade, false) AS enabled "
+                       "FROM alarm_master_schemes WHERE scheme_id = ?"), {schemeId});
+    QSqlQuery row = result;
+    return row.next() && row.value(QStringLiteral("enabled")).toBool();
 }
 
 NoAlarmAreaPolicy::AreaDomainMap

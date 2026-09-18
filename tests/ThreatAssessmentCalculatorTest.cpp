@@ -49,6 +49,15 @@ int main()
         return 1;
     }
 
+    ThreatAssessmentParams zeroWeights = params;
+    zeroWeights.typeWeight = zeroWeights.speedWeight = zeroWeights.distanceWeight = 0.0;
+    zeroWeights.angleWeight = 1.0;
+    const auto onlyAngle = calculateTargetThreatAssessment(track, targetType, zeroWeights, context);
+    if (!near(onlyAngle.assessment.weightedTypeScore, 0.0)
+        || !near(onlyAngle.assessment.weightedSpeedScore, 0.0)
+        || !near(onlyAngle.assessment.weightedDistanceScore, 0.0)
+        || !near(onlyAngle.assessment.totalThreatLevel, 50.0)) return 1;
+
     targetType = QStringLiteral("buoy");
     const ThreatAssessmentCalculation buoy =
         calculateTargetThreatAssessment(track, targetType, params, context);

@@ -39,6 +39,22 @@ uint32_t zibaoweiTrackIdFromFusionSources(const TargetFull::TargetObject& t)
     return 0U;
 }
 
+uint32_t zibaoweiTrackIdFromSources(const TargetFull::TargetObject& t)
+{
+    for (const TargetFull::TargetSourceItem& src : t.sources()) {
+        const QString source = QString::fromStdString(src.entity_id()).trimmed().toLower();
+        if (source != QLatin1String("zi_bao_wei") && source != QLatin1String("zibaowei")) {
+            continue;
+        }
+        bool valid = false;
+        const uint32_t id = QString::fromStdString(src.source_track_id()).trimmed().toUInt(&valid);
+        if (valid && id > 0U && id <= static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+            return id;
+        }
+    }
+    return 0U;
+}
+
 void fillFusionTrackIds(const TargetFull::TargetObject& t, SPxPacketTrackExtended& out)
 {
     int idx = 0;
@@ -60,7 +76,9 @@ void fillFusionTrackIds(const TargetFull::TargetObject& t, SPxPacketTrackExtende
         out.fusion.sensors = (1U << idx) - 1U;
     }
 
-    const uint32_t zibaoweiId = zibaoweiTrackIdFromFusionSources(t);
+    const uint32_t topLevelId = zibaoweiTrackIdFromSources(t);
+    const uint32_t zibaoweiId = topLevelId != 0U
+        ? topLevelId : zibaoweiTrackIdFromFusionSources(t);
     if (zibaoweiId != 0U) {
         out.fusion.trackID[0] = zibaoweiId;
     }
@@ -197,6 +215,13 @@ bool targetToSpxExtended(
 
     out.msgTimeSecs = static_cast<uint32_t>(QDateTime::currentDateTime().toSecsSinceEpoch());
     out.msgTimeUsecs = 0;
+    double createdSeconds = t.created_time();
+    if (createdSeconds > 1.0e11) createdSeconds /= 1000.0;
+    if (std::isfinite(createdSeconds) && createdSeconds > 1.0e9
+        && createdSeconds <= static_cast<double>(out.msgTimeSecs) + 60.0) {
+        out.norm.min.reserved4 = static_cast<uint32_t>(createdSeconds);
+        out.norm.min.reserved5 = 0x444d4f41U;
+    }
 
     out.norm.min.id = 0;
     if (targetId <= static_cast<qint64>(std::numeric_limits<uint32_t>::max())) {

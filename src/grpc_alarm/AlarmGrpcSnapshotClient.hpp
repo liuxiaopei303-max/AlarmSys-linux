@@ -3,6 +3,8 @@
 #include <memory>
 #include <string>
 
+#include <QHash>
+#include <QMutex>
 #include <grpcpp/channel.h>
 
 #include "alarm_service.grpc.pb.h"
@@ -34,4 +36,7 @@ private:
     std::string m_producerId = "AlarmSys-linux";
     std::shared_ptr<grpc::Channel> m_channel;
     std::unique_ptr<trackmanager::grpc::alarm::AlarmResultService::Stub> m_stub;
+    // 全量快照会保留最近十分钟的告警；源航迹短暂消失后也不能重发已排除目标。
+    mutable QMutex m_suppressedAirMutex;
+    mutable QHash<qint64, qint64> m_suppressedAirUntilMs;
 };

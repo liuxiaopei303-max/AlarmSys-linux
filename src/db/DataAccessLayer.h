@@ -248,6 +248,7 @@ public:
     ThreatAssessmentParams getThreatAssessmentParams(int groupId, int areaId);
     ThreatAssessmentParams getThreatAssessmentParams(int groupId, int areaId, const QString& schemeId);
     QString getActiveSchemeId(); // 获取当前活跃的方案ID
+    bool getDemoParallelUpgrade(const QString& schemeId);
     NoAlarmAreaPolicy::AreaDomainMap getSchemeNoAlarmAreas(const QString& schemeId);
     QMap<QString, QPair<int, int>> getActiveSchemeProtectAreas(); // 获取当前活跃方案的保护区信息 <areaKey, <protectGroupID, protectAreaID>>
     bool saveThreatAssessmentParams(const ThreatAssessmentParams& params);
