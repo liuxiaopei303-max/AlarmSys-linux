@@ -1,4 +1,5 @@
 #include "TrackAlarmThread.h"
+#include "AlarmTrackAge.h"
 #include "AlarmMotionConditions.h"
 #include "DemoRecognitionMatcher.h"
 #include "AlarmAreaGeometryParser.h"
@@ -1866,7 +1867,8 @@ AreaEscalationEvaluator::AreaEvidence TrackAlarmThread::evaluateAreaEscalationEv
 	const SPxPacketTrackExtended& track,
 	const DataAccessLayer::DetectionTypeResult& detection,
 	bool previousSpeedPassed,
-	bool insideArea, qint64 businessTargetId, double trackAgeSeconds)
+	bool insideArea, qint64 businessTargetId, double trackAgeSeconds,
+	bool recognitionPassed)
 {
 	AreaEscalationEvaluator::AreaEvidence evidence;
 	evidence.available = insideArea;
@@ -1883,6 +1885,8 @@ AreaEscalationEvaluator::AreaEvidence TrackAlarmThread::evaluateAreaEscalationEv
 		*field = false;
 		failures.append(reason);
 	};
+	if (!recognitionPassed)
+		reject(&evidence.hard.recognition, QStringLiteral("recognition"));
 
 	const double speed = track.norm.min.speedMps;
 	const bool currentSpeedPassed = AlarmMotionConditions::speedPassed(
@@ -2005,9 +2009,11 @@ AreaEscalationEvaluator::AreaEvidence TrackAlarmThread::evaluateAreaEscalationEv
 			break;
 		}
 	}
-	const ThreatAssessmentResult assessment = calculateThreatAssessment(
-		track, detection, threatParams, hasProtectArea, protectCenter, angleToCheck);
-	evidence.score = qBound(0, static_cast<int>(qRound(assessment.totalThreatLevel)), 100);
+	if (recognitionPassed) {
+		const ThreatAssessmentResult assessment = calculateThreatAssessment(
+			track, detection, threatParams, hasProtectArea, protectCenter, angleToCheck);
+		evidence.score = qBound(0, static_cast<int>(qRound(assessment.totalThreatLevel)), 100);
+	}
 	evidence.hard.failure = failures.join(QLatin1Char('|'));
 	return evidence;
 }
@@ -2068,15 +2074,12 @@ void TrackAlarmThread::processAreaEscalation()
 			const QString targetKey = QStringLiteral("%1|%2")
 				.arg(static_cast<int>(domain)).arg(targetId);
 			const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-			if (gConfig->m_demoParallelUpgrade && !m_demoFirstSeenMs.contains(demoAgeKey))
+			if (!m_demoFirstSeenMs.contains(demoAgeKey))
 				m_demoFirstSeenMs.insert(demoAgeKey, nowMs);
-			const qint64 fromTrackMs = track.norm.min.reserved5 == 0x444d4f41U
-				? static_cast<qint64>(track.norm.min.reserved4) * 1000 : 0;
-			const qint64 birthMs = gConfig->m_demoParallelUpgrade
-				&& fromTrackMs > 1000000000000LL && fromTrackMs <= nowMs
-				? fromTrackMs : m_demoFirstSeenMs.value(demoAgeKey, nowMs);
-			const double ageSeconds = gConfig->m_demoParallelUpgrade
-				? std::max<qint64>(0, nowMs - birthMs) / 1000.0 : 0.0;
+			const double ageSeconds = AlarmTrackAge::secondsSinceFirstSeen(
+				nowMs, m_demoFirstSeenMs.value(demoAgeKey, nowMs),
+				track.norm.min.reserved4,
+				track.norm.min.reserved5 == 0x444d4f41U);
 			const QString speedKey = QStringLiteral("%1|%2")
 				.arg(binding.rule.condition_id).arg(targetId);
 			liveSpeedKeys.insert(speedKey);
@@ -2144,6 +2147,23 @@ void TrackAlarmThread::processAreaEscalation()
 				detectionCache.insert(
 					targetKey, cognitiveEvidenceForUniqueId(detectionId));
 			const DataAccessLayer::DetectionTypeResult detection = detectionCache.value(targetKey);
+			const QString areaKey = QStringLiteral("%1_%2")
+				.arg(binding.rule.group_id).arg(binding.rule.area_id);
+			const int recognitionDomain = domain == AreaEscalationEvaluator::TargetDomain::Air
+				? 2 : 3;
+			const auto recognition = areaRecognitionPrerequisite(
+				gConfig->m_mapAreaKeyToIdentificationRuleIds.value(areaKey),
+				gConfig->m_mapAlarmIdentificationRulesSub, recognitionDomain);
+			if (insideArea && (recognition.needsOptic
+				|| binding.role == AreaEscalationEvaluator::AreaRole::Alarm)
+				&& !opticCache.contains(targetKey)) {
+				opticCache.insert(targetKey,
+					gConfig->dbHelper.hasMinioMultiMetadataForUniqueId(
+						detectionId, QStringLiteral("%")));
+			}
+			const bool recognitionPassed = recognition.passed(
+				gConfig->m_mapAlarmIdentificationRulesSub, recognitionDomain,
+				ageSeconds, opticCache.value(targetKey, false));
 
 			AreaEscalationEvaluator::AreaObservation observation;
 			observation.area = binding.area.key;
@@ -2159,13 +2179,8 @@ void TrackAlarmThread::processAreaEscalation()
 				&& binding.rule.ignore_threat_score;
 			observation.evidence = evaluateAreaEscalationEvidence(
 				binding.rule, track, detection, previousSpeedPassed, insideArea,
-				targetId, ageSeconds);
+				targetId, ageSeconds, recognitionPassed);
 			if (insideArea && binding.role == AreaEscalationEvaluator::AreaRole::Alarm) {
-				if (!opticCache.contains(targetKey)) {
-					opticCache.insert(targetKey,
-						gConfig->dbHelper.hasMinioMultiMetadataForUniqueId(
-							detectionId, QStringLiteral("%")));
-				}
 				observation.evidence.opticSeen = opticCache.value(targetKey, false);
 				if (gConfig->m_demoParallelUpgrade) {
 					if (binding.rule.require_optic_photo
@@ -2173,13 +2188,6 @@ void TrackAlarmThread::processAreaEscalation()
 						observation.evidence.hard.opticRequired = false;
 						observation.evidence.hard.failure += QStringLiteral("|optic_required");
 					}
-					const QString areaKey = QStringLiteral("%1_%2")
-						.arg(binding.rule.group_id).arg(binding.rule.area_id);
-					observation.evidence.recognitionMatched = !matchingDemoRecognitionRule(
-						gConfig->m_mapAreaKeyToIdentificationRuleIds.value(areaKey),
-						gConfig->m_mapAlarmIdentificationRulesSub,
-						domain == AreaEscalationEvaluator::TargetDomain::Air ? 2 : 3,
-						ageSeconds, observation.evidence.opticSeen).isEmpty();
 				}
 				if ((!observation.ignoreThreatScore
 					&& observation.evidence.score < observation.threatThreshold)

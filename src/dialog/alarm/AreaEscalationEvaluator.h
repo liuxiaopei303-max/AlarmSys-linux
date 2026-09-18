@@ -101,6 +101,7 @@ public:
         bool angleDuration = true;
         bool trackAge = true;
         bool opticRequired = true;
+        bool recognition = true;
         bool targetType = true;
         bool targetAttributes = true;
         // 是否存在识别结果，仅作为 optic/类型证据记录。无识别结果
@@ -121,7 +122,6 @@ public:
         HardConditions hard;
         QString conditionId;
         bool opticSeen = false;
-        bool recognitionMatched = false;
         /** 对海知识库 archive_status=true；只在 B 区作为独立 HIGH 证据。 */
         bool archiveVisitMatched = false;
         QString archiveTargetLabel;

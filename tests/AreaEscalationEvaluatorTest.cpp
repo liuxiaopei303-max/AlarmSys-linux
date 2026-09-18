@@ -1,4 +1,5 @@
 #include "dialog/alarm/AreaEscalationEvaluator.h"
+#include "dialog/alarm/AlarmTrackAge.h"
 #include "dialog/alarm/DemoRecognitionMatcher.h"
 
 #include <QCoreApplication>
@@ -679,21 +680,34 @@ void demoSchemeIsolationTests()
     CHECK("B区初见不产生A区预警",
           e.evaluateCycle({target(QPointF(5, 5), 60, 0)}, 1000).isEmpty());
     e.reset(demo);
+    auto archive = target(QPointF(5, 5), 0, 0);
+    archive.alarm.archiveVisitMatched = true;
+    archive.alarm.hard.recognition = false;
+    const auto independentArchive = one(e.evaluateCycle({archive}, 1000));
+    CHECK("知识库独立直告不受识别前置门槛影响",
+          independentArchive.stage == Evaluator::Stage::Alarm
+              && independentArchive.reason == QStringLiteral("archive_visit"));
+    e.reset(demo);
     const auto warning = one(e.evaluateCycle({target(QPointF(1, 1), 60, 0)}, 1000));
     CHECK("先在A区得到MEDIUM", warning.stage == Evaluator::Stage::Prewarning);
     auto recognized = target(QPointF(5, 5), 0, 0);
-    recognized.alarm.recognitionMatched = true;
+    recognized.alarm.hard.recognition = true;
     recognized.alarm.hard.speed = false;
     recognized.alarm.hard.height = false;
     const auto upgraded = one(e.evaluateCycle({recognized}, 1100));
-    CHECK("已有MEDIUM进入B后识别独立升级HIGH",
-          upgraded.stage == Evaluator::Stage::Alarm
-              && upgraded.reason == QStringLiteral("identification"));
+    CHECK("已有MEDIUM进入B后识别合格仍不得绕过运动和高度条件",
+          upgraded.stage == Evaluator::Stage::Prewarning);
 
     e.reset(demo);
     e.evaluateCycle({target(QPointF(1, 1), 20, 0)}, 1000);
     const auto low = one(e.evaluateCycle({recognized}, 1100));
     CHECK("仅LOW不得通过识别升级", low.stage == Evaluator::Stage::Threat);
+
+    e.reset(demo);
+    auto unrecognizedWarning = target(QPointF(1, 1), 60, 0);
+    unrecognizedWarning.warning.hard.recognition = false;
+    CHECK("识别前提不合格不得形成预警",
+          e.evaluateCycle({unrecognizedWarning}, 1000).isEmpty());
 
     e.reset(demo);
     e.evaluateCycle({target(QPointF(1, 1), 60, 0)}, 1000);
@@ -760,7 +774,12 @@ void demoParallelAirRuleTests()
     CHECK("B2有图片但不足5秒不得告警", tooYoung.stage == Evaluator::Stage::Prewarning);
     const auto noPhoto = one(e.evaluateCycle({air(QPointF(5, 5), 0, 0, 0, true, false)}, 1200));
     CHECK("B2足5秒但无图片不得告警", noPhoto.stage == Evaluator::Stage::Prewarning);
-    const auto photo = one(e.evaluateCycle({air(QPointF(5, 5), 0, 0, 0, true, true)}, 1300));
+    auto photoWithoutRecognition = air(QPointF(5, 5), 0, 0, 0, true, true);
+    photoWithoutRecognition.observations[2].evidence.hard.recognition = false;
+    const auto noRecognition = one(e.evaluateCycle({photoWithoutRecognition}, 1300));
+    CHECK("B2有照片但识别前提未通过不得告警",
+          noRecognition.stage == Evaluator::Stage::Prewarning);
+    const auto photo = one(e.evaluateCycle({air(QPointF(5, 5), 0, 0, 0, true, true)}, 1400));
     CHECK("B2年龄及图片齐备不受威胁分限制",
           photo.stage == Evaluator::Stage::Alarm
               && photo.reason == QStringLiteral("optic")
@@ -800,6 +819,46 @@ void demoRecognitionCriteriaTests()
               && matchingDemoRecognitionRule(air, rules, 2, 11, false) == QStringLiteral("air-age"));
     CHECK("识别规则海空隔离",
           matchingDemoRecognitionRule(sea, rules, 2, 11, true).isEmpty());
+    const auto airGate = areaRecognitionPrerequisite(air, rules, 2);
+    CHECK("对空识别五秒有图或十秒无图前置门槛",
+          airGate.required() && airGate.needsOptic
+              && !airGate.passed(rules, 2, 5, true)
+              && airGate.passed(rules, 2, 6, true)
+              && !airGate.passed(rules, 2, 10, false)
+              && airGate.passed(rules, 2, 11, false));
+    const auto seaGate = areaRecognitionPrerequisite(sea, rules, 3);
+    CHECK("对海七秒且有图作为前置门槛",
+          seaGate.required() && seaGate.needsOptic
+              && !seaGate.passed(rules, 3, 7, true)
+              && !seaGate.passed(rules, 3, 8, false)
+              && seaGate.passed(rules, 3, 8, true));
+    CHECK("未关联或仅关联另一目标域时无前置门槛",
+          !areaRecognitionPrerequisite({}, rules, 2).required()
+              && !areaRecognitionPrerequisite(sea, rules, 2).required());
+    const auto missingGate = areaRecognitionPrerequisite(
+        {QStringLiteral("deleted-rule")}, rules, 2);
+    CHECK("存在失效关联时不能回退成无条件告警",
+          missingGate.required() && !missingGate.passed(rules, 2, 30, true));
+}
+
+void trackAgeRegressionTests()
+{
+    const qint64 firstSeenMs = 1789730000123LL;
+    const auto age = [&](qint64 elapsedMs, std::uint32_t upstreamSeconds) {
+        return AlarmTrackAge::secondsSinceFirstSeen(
+            firstSeenMs + elapsedMs, firstSeenMs, upstreamSeconds, true);
+    };
+    CHECK("航迹起始时未满足五秒门槛", age(0, firstSeenMs / 1000) < 5.0);
+    CHECK("上游创建时间逐帧更新时五秒图片分支仍可生效",
+          age(6000, (firstSeenMs + 6000) / 1000) > 5.0);
+    CHECK("上游创建时间逐帧更新时十秒时长分支仍可生效",
+          age(11000, (firstSeenMs + 11000) / 1000) > 10.0);
+    CHECK("早于首次见到的真实创建时间仍可计入年龄",
+          age(1000, (firstSeenMs - 20000) / 1000) > 20.0);
+    CHECK("未来或无效的上游时间回退到首次见到",
+          age(11000, (firstSeenMs + 30000) / 1000) > 10.0
+              && AlarmTrackAge::secondsSinceFirstSeen(firstSeenMs + 11000,
+                     firstSeenMs, 0, false) > 10.0);
 }
 
 } // namespace
@@ -820,6 +879,7 @@ int main(int argc, char** argv)
     demoSchemeIsolationTests();
     demoParallelAirRuleTests();
     demoRecognitionCriteriaTests();
+    trackAgeRegressionTests();
     qInfo() << "AreaEscalationEvaluator tests completed, failures=" << failures;
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

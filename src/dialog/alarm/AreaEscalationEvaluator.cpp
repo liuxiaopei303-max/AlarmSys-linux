@@ -190,14 +190,14 @@ bool AreaEscalationEvaluator::PairDefinition::isValid(QString* error) const
 bool AreaEscalationEvaluator::HardConditions::allPassed() const
 {
     return speed && speedDoubleCheck && height && entryAngle && heading && angleDuration
-        && trackAge && opticRequired && targetType
+        && trackAge && opticRequired && recognition && targetType
         && targetAttributes && protectDistance && entryTime;
 }
 
 bool AreaEscalationEvaluator::HardConditions::allExceptSpeedDoubleCheck() const
 {
     return speed && height && entryAngle && heading && angleDuration && trackAge
-        && opticRequired && targetType && targetAttributes
+        && opticRequired && recognition && targetType && targetAttributes
         && protectDistance && entryTime;
 }
 
@@ -217,8 +217,9 @@ QString AreaEscalationEvaluator::HardConditions::summary() const
         .arg(entryTime ? 1 : 0)
         .arg(failure) + QStringLiteral(",heading=%1,angle_duration=%2")
         .arg(heading ? 1 : 0).arg(angleDuration ? 1 : 0)
-        + QStringLiteral(",track_age=%1,optic_required=%2")
-            .arg(trackAge ? 1 : 0).arg(opticRequired ? 1 : 0);
+        + QStringLiteral(",track_age=%1,optic_required=%2,recognition=%3")
+            .arg(trackAge ? 1 : 0).arg(opticRequired ? 1 : 0)
+            .arg(recognition ? 1 : 0);
 }
 
 AreaEscalationEvaluator::AreaEscalationEvaluator(Clock clock)
@@ -755,12 +756,6 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
                 }
                 const qint64 dwellMs = highEligible && areaState.alarmEntryTimeMs > 0
                     ? std::max<qint64>(0, nowMs - areaState.alarmEntryTimeMs) : 0;
-                if (m_pair.demoParallelUpgrade && state.stage == Stage::Prewarning
-                    && priorQualification && item.inside && evidence.available
-                    && evidence.recognitionMatched) {
-                    upgradeFrom(Stage::Alarm, Disposition::VerifySuccess,
-                                QStringLiteral("identification"), item);
-                }
                 if (highEligible && !(m_pair.demoParallelUpgrade
                     && item.observation.entryOnly)) {
                     if (evidence.opticSeen) {

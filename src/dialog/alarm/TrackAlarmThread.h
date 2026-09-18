@@ -46,7 +46,7 @@ private:
         const DataAccessLayer::DetectionTypeResult& detection,
         bool previousSpeedPassed,
         bool insideArea,
-        qint64 targetId, double trackAgeSeconds);
+        qint64 targetId, double trackAgeSeconds, bool recognitionPassed);
     void applyAreaEscalationResult(const AreaEscalationEvaluator::Result& result);
     bool findAlarmArea(int groupId, int areaId, AlarmArea* out) const;
     bool findConfiguredNoAlarmArea(
