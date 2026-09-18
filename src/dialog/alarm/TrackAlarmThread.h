@@ -78,6 +78,7 @@ private:
     bool m_areaEscalationActive = false;
     quint64 m_areaEscalationGeneration = 0;
     QList<AreaEscalationBinding> m_areaEscalationBindings;
+    QSet<QString> m_virtualShipAreas; // 启用虚兵376直达的方案区域，键为 group/area
     QSet<QString> m_areaEscalationClaimedConditionIds;
     QHash<QString, bool> m_areaEscalationPreviousSpeed;
     QHash<QString, qint64> m_demoFirstSeenMs;

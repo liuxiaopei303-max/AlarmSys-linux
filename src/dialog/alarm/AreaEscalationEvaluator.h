@@ -138,12 +138,15 @@ public:
         int prewarningThreshold = 60;
         bool entryOnly = false;
         bool ignoreThreatScore = false;
+        /** 勾选区域的虚拟对海船只独立直达证据；不参与常规规则。 */
+        bool virtualShipDirect = false;
         AreaEvidence evidence;
     };
 
     struct TargetSnapshot {
         qint64 targetId = 0;
         TargetDomain domain = TargetDomain::Surface;
+        bool virtualSurfaceShip = false;
         QString laneId;
         QPointF position; // x=lat, y=lon，与现有 AlarmSys 区域坐标约定一致
         double courseDeg = 0.0;

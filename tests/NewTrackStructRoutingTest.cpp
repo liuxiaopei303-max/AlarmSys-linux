@@ -180,6 +180,10 @@ int main(int argc, char** argv)
                     << convertedUnifiedSurface.norm.min.reserved2;
         return 1;
     }
+    if (!NewTrackStructGrpcConvert::isVirtualSurfaceShip(convertedUnifiedSurface)) {
+        qCritical() << "virtual surface ship metadata was lost during conversion";
+        return 1;
+    }
     if (NewTrackStructGrpcConvert::resolveTargetTypeForScoring(
             QStringLiteral("fishingboat"), convertedUnifiedSurface)
         != QStringLiteral("fishingboat")) {
@@ -193,6 +197,35 @@ int main(int argc, char** argv)
         || !NewTrackStructGrpcConvert::resolveTargetTypeForScoring(
                 QString(), convertedBuoy).isEmpty()) {
         qCritical() << "surface buoy was incorrectly treated as ship";
+        return 1;
+    }
+    if (NewTrackStructGrpcConvert::isVirtualSurfaceShip(convertedBuoy)) {
+        qCritical() << "virtual buoy incorrectly classified as ship";
+        return 1;
+    }
+    SPxPacketTrackExtended convertedRealShip;
+    if (!NewTrackStructGrpcConvert::targetToSpxExtended(
+            realSurfaceTarget, convertedRealShip, false)
+        || NewTrackStructGrpcConvert::isVirtualSurfaceShip(convertedRealShip)) {
+        qCritical() << "real ship incorrectly classified as virtual";
+        return 1;
+    }
+    proto::TargetObject virtualAirShip = unifiedSurfaceTarget;
+    virtualAirShip.set_environment(proto::EnvironmentType_AIR);
+    SPxPacketTrackExtended convertedAirShip;
+    if (!NewTrackStructGrpcConvert::targetToSpxExtended(
+            virtualAirShip, convertedAirShip, true)
+        || NewTrackStructGrpcConvert::isVirtualSurfaceShip(convertedAirShip)) {
+        qCritical() << "air target incorrectly matched virtual surface ship";
+        return 1;
+    }
+    proto::TargetObject unknownRealityShip = unifiedSurfaceTarget;
+    unknownRealityShip.set_reality_type(proto::RealityType_UNKNOWN_REALITY);
+    SPxPacketTrackExtended convertedUnknownReality;
+    if (!NewTrackStructGrpcConvert::targetToSpxExtended(
+            unknownRealityShip, convertedUnknownReality, false)
+        || NewTrackStructGrpcConvert::isVirtualSurfaceShip(convertedUnknownReality)) {
+        qCritical() << "unknown reality incorrectly treated as virtual";
         return 1;
     }
 

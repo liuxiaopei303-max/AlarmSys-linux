@@ -75,6 +75,9 @@ bool targetToSpxExtended(
     SPxPacketTrackExtended& out,
     bool birdTopic);
 
+/** 仅识别统一航迹明确标记的虚拟、对海、船只；旧航迹不做猜测。 */
+bool isVirtualSurfaceShip(const SPxPacketTrackExtended& track);
+
 /**
  * 解析告警评分使用的目标类型。
  *

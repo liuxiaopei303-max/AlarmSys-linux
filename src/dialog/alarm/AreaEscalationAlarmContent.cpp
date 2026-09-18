@@ -64,6 +64,13 @@ QString buildAreaEscalationContent(
             : QStringLiteral("目标 %1（%2）为知识库中的威胁目标，直接告警")
                   .arg(result.targetId).arg(archiveLabel);
         object.insert(QStringLiteral("summary"), summary);
+    } else if (result.reason == QLatin1String("virtual_ship_direct")) {
+        object.insert(QStringLiteral("summary"),
+            QStringLiteral("虚兵船只376进入已启用直达的%1，直接%2")
+                .arg(result.stage == AreaEscalationEvaluator::Stage::Alarm
+                         ? QStringLiteral("告警区") : QStringLiteral("预警区"),
+                     result.stage == AreaEscalationEvaluator::Stage::Alarm
+                         ? QStringLiteral("告警") : QStringLiteral("预警")));
     } else if (object.value(QStringLiteral("summary")).toString().trimmed().isEmpty()) {
         object.insert(
             QStringLiteral("summary"),

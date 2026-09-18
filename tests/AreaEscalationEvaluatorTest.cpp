@@ -861,6 +861,63 @@ void trackAgeRegressionTests()
                      firstSeenMs, 0, false) > 10.0);
 }
 
+void virtualShipDirectTests()
+{
+    Evaluator e;
+    auto policy = pair();
+    policy.warningAreas = {rect(17, 0, 0, 3, 3)};
+    policy.alarmAreas = {rect(15, 8, 0, 11, 3)};
+    CHECK("虚兵直达区域策略加载", e.reset(policy));
+    auto observe = [](qint64 id, const QPointF& point, bool warning, bool alarm,
+                      bool virtualSurfaceShip = true) {
+        Evaluator::TargetSnapshot snapshot;
+        snapshot.targetId = id;
+        snapshot.domain = Evaluator::TargetDomain::Surface;
+        snapshot.virtualSurfaceShip = virtualSurfaceShip;
+        snapshot.laneId = QStringLiteral("SURFACE");
+        snapshot.position = point;
+        for (auto area : {17, 15}) {
+            Evaluator::AreaObservation item;
+            item.area = {3, area};
+            item.role = area == 17 ? Evaluator::AreaRole::Warning : Evaluator::AreaRole::Alarm;
+            item.laneId = snapshot.laneId;
+            item.evidence.conditionId = QStringLiteral("threat_rule_3_%1_virtual_ship_376").arg(area);
+            item.evidence.available = true;
+            item.virtualShipDirect = area == 17 ? warning : alarm;
+            item.threatThreshold = 20;
+            item.prewarningThreshold = 35;
+            snapshot.observations.append(item);
+        }
+        return snapshot;
+    };
+    const auto warning = one(e.evaluateCycle({observe(376, QPointF(1, 1), true, true)}, 100));
+    CHECK("虚拟对海船在勾选预警区无分数直接 MEDIUM",
+          warning.stage == Evaluator::Stage::Prewarning
+          && warning.reason == QStringLiteral("virtual_ship_direct"));
+    const auto alarm = one(e.evaluateCycle({observe(376, QPointF(9, 1), true, true)}, 200));
+    CHECK("虚拟对海船在勾选告警区直接 HIGH", alarm.stage == Evaluator::Stage::Alarm
+          && alarm.reason == QStringLiteral("virtual_ship_direct"));
+    e.reset(policy);
+    CHECK("未勾选预警区不直达",
+          e.evaluateCycle({observe(376, QPointF(1, 1), false, true)}, 300).isEmpty());
+    CHECK("新一轮虚兵船 ID 不固定仍直接告警",
+          one(e.evaluateCycle({observe(377, QPointF(9, 1), true, true)}, 400)).stage
+              == Evaluator::Stage::Alarm);
+    CHECK("真实船即使旧 target_id=376 也不能直达",
+          e.evaluateCycle({observe(376, QPointF(9, 1), true, true, false)}, 450).isEmpty());
+    CHECK("对海浮标或未知真实属性不直达",
+          e.evaluateCycle({observe(380, QPointF(9, 1), true, true, false)}, 460).isEmpty());
+    e.reset(policy);
+    CHECK("仅勾选告警区无需预警资格也直接 HIGH",
+          one(e.evaluateCycle({observe(376, QPointF(9, 1), false, true)}, 500)).stage
+              == Evaluator::Stage::Alarm);
+    e.reset(policy);
+    auto suppressed = observe(376, QPointF(9, 1), false, true);
+    suppressed.suppressNewEvent = true;
+    suppressed.suppressAllNewEvents = true;
+    CHECK("精确免告警区阻止直达", e.evaluateCycle({suppressed}, 600).isEmpty());
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -880,6 +937,7 @@ int main(int argc, char** argv)
     demoParallelAirRuleTests();
     demoRecognitionCriteriaTests();
     trackAgeRegressionTests();
+    virtualShipDirectTests();
     qInfo() << "AreaEscalationEvaluator tests completed, failures=" << failures;
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

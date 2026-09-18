@@ -616,6 +616,25 @@ QList<AreaEscalationEvaluator::Result> AreaEscalationEvaluator::evaluateCycle(
                 transitionHard = evidence.hard.summary();
         };
 
+        // 方案区域开关仅对明确标记的虚拟对海船只生效，不受识别/航速/角度/威胁分限制。
+        // 精确免告警区和人工过滤仍在上游阻断新事件。
+        if (snapshot.domain == TargetDomain::Surface && snapshot.virtualSurfaceShip
+            && allowTransitions && !snapshot.suppressAllNewEvents) {
+            for (const EvaluatedObservation& item : evaluated) {
+                if (!item.inside || !item.observation.virtualShipDirect) continue;
+                AreaEvidence direct = item.observation.evidence;
+                direct.score = 90;
+                direct.available = true;
+                if (item.observation.role == AreaRole::Alarm) {
+                    upgradeFrom(Stage::Alarm, Disposition::Unassigned,
+                                QStringLiteral("virtual_ship_direct"), item, &direct);
+                    break;
+                }
+                upgradeFrom(Stage::Prewarning, Disposition::Unassigned,
+                            QStringLiteral("virtual_ship_direct"), item, &direct);
+            }
+        }
+
         // 知识库中的对海威胁目标是独立的直接告警证据。它仍要求当前点位于 B，
         // 并绕过普通规则硬条件/评分；精确免告警区会阻止它创建新事件，
         // 但不影响已经存在的活动事件继续升级。

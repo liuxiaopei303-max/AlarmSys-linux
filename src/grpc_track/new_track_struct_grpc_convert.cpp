@@ -44,6 +44,8 @@ constexpr double kEps = 1e-6;
 constexpr uint16_t kClassifiedTypeMarkerMask = 0xFF00U;
 constexpr uint16_t kClassifiedTypeMarker = 0xA500U;
 constexpr uint16_t kClassifiedTypeValueMask = 0x00FFU;
+// norm.reserved2 未用于现有告警；签名避免旧 SPx 航迹误命中。
+constexpr uint32_t kVirtualSurfaceShipMarker = 0x56534850U; // VSHP
 
 uint16_t encodeClassifiedType(int classifiedType)
 {
@@ -321,6 +323,11 @@ bool targetToSpxExtended(const TargetObject& t, SPxPacketTrackExtended& out, boo
         out.secondary.uniqueID = static_cast<uint32_t>(targetId & 0xFFFFFFFFULL);
     }
     out.norm.reserved3 = threatScoreFromPriority(t);
+    if (t.reality_type() == RealityType_VIRTUAL
+        && t.environment() == EnvironmentType_SURFACE
+        && t.classified_type() == UnitType_SURFACE_SHIP) {
+        out.norm.reserved2 = kVirtualSurfaceShipMarker;
+    }
     fillFusionTrackIds(t, out);
     // reserved1 保持既有的无人机筛选语义；reserved2 此前未被 AlarmSys 使用，
     // 用带签名值保留统一航迹的明确 classified_type，避免误读旧 SPx 数据。
@@ -332,6 +339,11 @@ bool targetToSpxExtended(const TargetObject& t, SPxPacketTrackExtended& out, boo
         out.norm.min.reserved1 = 1;
     }
     return true;
+}
+
+bool isVirtualSurfaceShip(const SPxPacketTrackExtended& track)
+{
+    return track.norm.reserved2 == kVirtualSurfaceShipMarker;
 }
 
 QString resolveTargetTypeForScoring(

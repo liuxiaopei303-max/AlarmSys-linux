@@ -1715,6 +1715,7 @@ bool TrackAlarmThread::configureAreaEscalation(const QList<AlarmRule>& rules)
 	m_areaEscalationGeneration = gConfig->m_alarmConfigGeneration;
 	m_areaEscalationActive = false;
 	m_areaEscalationBindings.clear();
+	m_virtualShipAreas.clear();
 	m_areaEscalationClaimedConditionIds.clear();
 	m_areaEscalationPreviousSpeed.clear();
 	m_demoFirstSeenMs.clear();
@@ -1776,6 +1777,12 @@ bool TrackAlarmThread::configureAreaEscalation(const QList<AlarmRule>& rules)
 		AreaEscalationEvaluator::AreaRole role) -> bool {
 		for (auto areaIt = areas.constBegin(); areaIt != areas.constEnd(); ++areaIt) {
 			const QList<AlarmRule>& areaRules = areaIt.value();
+			for (const AlarmRule& rule : areaRules) {
+				if (rule.track_type == 0
+					&& (rule.condition_id.endsWith(QLatin1String("_virtual_ship_376"))
+						|| rule.condition_id.endsWith(QLatin1String("_virtual_surface_ship"))))
+					m_virtualShipAreas.insert(areaIt.key());
+			}
 			if (areaRules.isEmpty())
 				return fail(QStringLiteral("区域 %1 未绑定规则").arg(areaIt.key()));
 			AlarmArea alarmArea;
@@ -1801,8 +1808,9 @@ bool TrackAlarmThread::configureAreaEscalation(const QList<AlarmRule>& rules)
 				}
 				const QString bindingKey = QStringLiteral("%1|%2")
 					.arg(areaIt.key()).arg(rule.track_type);
-				if (bindingKeys.contains(bindingKey)
-					&& !(policy.demoParallelUpgrade
+			if (bindingKeys.contains(bindingKey)
+				&& !(rule.track_type == 0 && m_virtualShipAreas.contains(areaIt.key()))
+				&& !(policy.demoParallelUpgrade
 						&& role == AreaEscalationEvaluator::AreaRole::Alarm))
 					return fail(QStringLiteral("同一区域同一 track_type 只能绑定一条规则: %1")
 						.arg(bindingKey));
@@ -2042,6 +2050,17 @@ void TrackAlarmThread::processAreaEscalation()
 			const SPxPacketTrackExtended& track = it.value();
 			const qint64 targetId = businessTargetId(static_cast<qint64>(it.key()), track);
 			if (targetId <= 0) continue;
+			// 旧标识已写入正在运行的 alarm_setting；仅为配置兼容，绝不按 ID 376 筛选目标。
+			const bool virtualShipRule = binding.rule.track_type == 0
+				&& (binding.rule.condition_id.endsWith(QLatin1String("_virtual_ship_376"))
+					|| binding.rule.condition_id.endsWith(QLatin1String("_virtual_surface_ship")));
+			const bool virtualSurfaceShip = binding.domain
+				== AreaEscalationEvaluator::TargetDomain::Surface
+				&& NewTrackStructGrpcConvert::isVirtualSurfaceShip(track);
+			if (virtualShipRule && !virtualSurfaceShip) continue;
+			if (!virtualShipRule && virtualSurfaceShip
+				&& binding.domain == AreaEscalationEvaluator::TargetDomain::Surface
+				&& m_virtualShipAreas.contains(binding.area.key.toString())) continue;
 			const auto domain = binding.domain;
 			liveTargets.insert({domain, targetId});
 			const QString demoAgeKey = QStringLiteral("%1|%2")
@@ -2096,6 +2115,7 @@ void TrackAlarmThread::processAreaEscalation()
 			AreaEscalationEvaluator::TargetSnapshot& snapshot = snapshotsByTarget[targetKey];
 			snapshot.targetId = targetId;
 			snapshot.domain = domain;
+			snapshot.virtualSurfaceShip = virtualSurfaceShip;
 			snapshot.laneId = binding.laneId;
 			snapshot.position = point;
 			snapshot.courseDeg = track.norm.min.courseDegrees;
@@ -2143,7 +2163,7 @@ void TrackAlarmThread::processAreaEscalation()
 
 			const qint64 detectionId = track.secondary.uniqueID > 0
 				? static_cast<qint64>(track.secondary.uniqueID) : targetId;
-			if (insideArea && !detectionCache.contains(targetKey))
+			if (insideArea && !virtualShipRule && !detectionCache.contains(targetKey))
 				detectionCache.insert(
 					targetKey, cognitiveEvidenceForUniqueId(detectionId));
 			const DataAccessLayer::DetectionTypeResult detection = detectionCache.value(targetKey);
@@ -2154,7 +2174,7 @@ void TrackAlarmThread::processAreaEscalation()
 			const auto recognition = areaRecognitionPrerequisite(
 				gConfig->m_mapAreaKeyToIdentificationRuleIds.value(areaKey),
 				gConfig->m_mapAlarmIdentificationRulesSub, recognitionDomain);
-			if (insideArea && (recognition.needsOptic
+			if (insideArea && !virtualShipRule && (recognition.needsOptic
 				|| binding.role == AreaEscalationEvaluator::AreaRole::Alarm)
 				&& !opticCache.contains(targetKey)) {
 				opticCache.insert(targetKey,
@@ -2177,7 +2197,11 @@ void TrackAlarmThread::processAreaEscalation()
 				&& binding.rule.area_judge == 4;
 			observation.ignoreThreatScore = gConfig->m_demoParallelUpgrade
 				&& binding.rule.ignore_threat_score;
-			observation.evidence = evaluateAreaEscalationEvidence(
+			observation.virtualShipDirect = virtualShipRule;
+			if (virtualShipRule) {
+				observation.evidence.available = insideArea;
+				observation.evidence.conditionId = binding.rule.condition_id;
+			} else observation.evidence = evaluateAreaEscalationEvidence(
 				binding.rule, track, detection, previousSpeedPassed, insideArea,
 				targetId, ageSeconds, recognitionPassed);
 			if (insideArea && binding.role == AreaEscalationEvaluator::AreaRole::Alarm) {
@@ -2306,7 +2330,8 @@ void TrackAlarmThread::applyAreaEscalationResult(
 	const bool publishStageChange = result.stageChanged
 		&& isAlarmEventStagePublishable(static_cast<int>(result.stage));
 	if (publishStageChange) {
-		if (result.reason == QLatin1String("archive_visit")) {
+		if (result.reason == QLatin1String("archive_visit")
+			|| result.reason == QLatin1String("virtual_ship_direct")) {
 			// 知识库命中不再生成速度/航向/评分规则文案；证据由升级模块确定性组装。
 			content = buildAreaEscalationContent(result);
 		} else {
