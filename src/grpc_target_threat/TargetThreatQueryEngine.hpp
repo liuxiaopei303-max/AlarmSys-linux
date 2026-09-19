@@ -10,7 +10,7 @@ class CustomConfig;
 namespace alarmsys {
 namespace grpc_target_threat {
 
-/** 按全局唯一 target_id 读取实时目标、计算最高区域威胁并附带当前告警。 */
+/** 按 target_id 读取实时目标，区内算最高区域威胁、区外算默认类型/速度，并附带当前告警。 */
 class TargetThreatQueryEngine
 {
 public:

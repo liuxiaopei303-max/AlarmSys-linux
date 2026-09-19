@@ -10,3 +10,8 @@ ArchiveVisitEvidence ArchiveVisitEvidence::fromDatabase(
     evidence.targetLabel = archiveTargetType.trimmed();
     return evidence;
 }
+
+bool ArchiveVisitEvidence::shouldTriggerGlobalSurfaceAlarm(bool manuallyFiltered) const
+{
+    return matched && !manuallyFiltered;
+}

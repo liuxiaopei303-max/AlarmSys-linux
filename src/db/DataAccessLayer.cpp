@@ -11,6 +11,7 @@
 #include <QVariantMap>
 #include <QHostInfo>
 #include <QtConcurrent>
+#include <stdexcept>
 DataAccessLayer& DataAccessLayer::getInstance()
 {
     static DataAccessLayer instance;
@@ -2188,6 +2189,28 @@ DataAccessLayer::DetectionTypeResult DataAccessLayer::getDetectionTypesByReId(qi
     return result;
 }
 
+ArchiveVisitEvidence DataAccessLayer::getRecentArchiveVisitByUniqueId(qint64 uniqueId)
+{
+    if (uniqueId <= 0)
+        return ArchiveVisitEvidence();
+
+    // unique_id 为唯一索引：先点查最多一行，再判断 observed_at，
+    // 不需要对大表增加时间索引或修改表结构。
+    const QString query =
+        "SELECT archive_target_type, archive_status "
+        "FROM cognitive_results_comprehensive "
+        "WHERE unique_id = ? "
+        "AND observed_at >= CURRENT_TIMESTAMP - INTERVAL '30 seconds' "
+        "LIMIT 1";
+    QSqlQuery sqlResult = m_dbManager.executeQuery(query, {uniqueId});
+    if (!sqlResult.next())
+        return ArchiveVisitEvidence();
+
+    return ArchiveVisitEvidence::fromDatabase(
+        sqlResult.value("archive_status").toString(),
+        sqlResult.value("archive_target_type").toString());
+}
+
 bool DataAccessLayer::ensureFinalTypeSourceEnumValues()
 {
     // enum 值已在库中创建；避免 ALTER TYPE 经 QPSQL prepare 破坏连接状态
@@ -2562,6 +2585,43 @@ AreaInfo DataAccessLayer::getAlarmArea(int groupID, int areaID)
 
     }
     return info;
+}
+
+QList<AreaInfo> DataAccessLayer::getTargetThreatQueryAreas(const QString& schemeId)
+{
+    const QString query = QStringLiteral(
+        "SELECT at.*, asa.warning_type AS query_warning_type, "
+        "asa.protect_group_id AS query_protect_group_id, "
+        "asa.protect_area_id AS query_protect_area_id "
+        "FROM alarm_scheme_areas asa "
+        "JOIN area_table at ON at.group_id = asa.group_id AND at.area_id = asa.area_id "
+        "WHERE asa.scheme_id = ? AND asa.warning_type IN (2, 3) "
+        "ORDER BY asa.group_id, asa.area_id");
+    QSqlQuery result = m_dbManager.executeQuery(query, {schemeId});
+    if (result.lastError().isValid())
+        throw std::runtime_error("failed to read target threat query scheme areas");
+
+    QList<AreaInfo> areas;
+    while (result.next()) {
+        AreaInfo area{};
+        area.groupID = result.value("group_id").toInt();
+        area.areaID = result.value("area_id").toInt();
+        area.groupName = result.value("group_name").toString();
+        area.areaName = result.value("area_name").toString();
+        area.areaType = result.value("area_type").toInt();
+        area.stratPoint = result.value("start_point").toString();
+        area.endPoint = result.value("end_point").toString();
+        area.areaRect = result.value("area_rect").toString();
+        area.areaPoints = result.value("area_points").toString();
+        area.checkState = result.value("check_state").toInt();
+        area.waringType = result.value("query_warning_type").toInt();
+        area.protectGroupID = result.value("query_protect_group_id").isNull()
+            ? -1 : result.value("query_protect_group_id").toInt();
+        area.protectAreaID = result.value("query_protect_area_id").isNull()
+            ? -1 : result.value("query_protect_area_id").toInt();
+        areas.append(area);
+    }
+    return areas;
 }
 QList<AreaInfo>DataAccessLayer::getGroupArea(int groupID)
 {

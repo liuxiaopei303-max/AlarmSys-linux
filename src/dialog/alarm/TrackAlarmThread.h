@@ -28,6 +28,7 @@ private:
     };
 
     void processAlarms();
+    void processGlobalArchiveVisitAlarms();
     void updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule info,int type,int radarSourceId = 0);
     bool isTrackInGroupArea(QPointF pt);
     bool isTrackInGroupAreaByGroupId(QPointF pt, int groupId);
@@ -86,6 +87,7 @@ private:
     AngleDurationGate m_areaAngleDuration;
     /** 单处理周期认知结果缓存；避免同一目标因多区域/多规则重复点查数据库。 */
     QHash<qint64, DataAccessLayer::DetectionTypeResult> m_cognitiveEvidenceCache;
+    qint64 m_lastGlobalArchiveVisitScanMs = 0;
 signals:
 
     void newAlarmDetected(QString);

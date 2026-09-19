@@ -416,6 +416,29 @@ set_target_properties(target_threat_proto_test PROPERTIES
 )
 add_test(NAME target_threat_proto_test COMMAND target_threat_proto_test)
 
+add_executable(target_threat_query_assessment_test
+    "${CMAKE_SOURCE_DIR}/tests/TargetThreatQueryAssessmentTest.cpp"
+    "${ALARM_SRC_DIR}/grpc_target_threat/TargetThreatQueryAssessment.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AlarmAreaGeometryParser.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/ThreatAssessmentCalculator.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationProtectionResolver.cpp"
+    "${ALARM_SRC_DIR}/grpc_track/new_track_struct_grpc_convert.cpp"
+    "${GRPC_TARGET_THREAT_GEN_DIR}/target_threat_query.pb.cc"
+    "${GRPC_ALARM_GEN_DIR}/alarm_service.pb.cc"
+    "${GRPC_NEW_TRACK_STRUCT_GEN_DIR}/target_stream.pb.cc"
+)
+target_include_directories(target_threat_query_assessment_test PRIVATE
+    "${ALARM_SRC_DIR}" "${SPX_INCLUDES}" "${GRPC_ROOT}/include"
+    "${GRPC_TARGET_THREAT_GEN_DIR}" "${GRPC_ALARM_GEN_DIR}" "${GRPC_NEW_TRACK_STRUCT_GEN_DIR}"
+)
+target_link_libraries(target_threat_query_assessment_test PRIVATE
+    Qt5::Core Qt5::Gui ${PROTOBUF_LIB} ${ABSL_SYNC_LIB} ${ABSL_STRINGS_LIB} pthread
+)
+set_target_properties(target_threat_query_assessment_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests" AUTOMOC OFF
+)
+add_test(NAME target_threat_query_assessment_test COMMAND target_threat_query_assessment_test)
+
 add_executable(alarm_content_builder_test
     "${CMAKE_SOURCE_DIR}/tests/AlarmContentBuilderTest.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationEvaluator.cpp"

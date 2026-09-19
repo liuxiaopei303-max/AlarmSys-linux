@@ -526,6 +526,78 @@ DataAccessLayer::DetectionTypeResult TrackAlarmThread::cognitiveEvidenceForUniqu
 	return result;
 }
 
+void TrackAlarmThread::processGlobalArchiveVisitAlarms()
+{
+	// 告警主循环约 100ms 一次。知识库结果来自数据库，按 1s 节流逐目标点查，
+	// 既保持近实时，又避免对当前所有水面航迹产生 10 倍查询压力。
+	const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+	if (m_lastGlobalArchiveVisitScanMs > 0
+		&& nowMs - m_lastGlobalArchiveVisitScanMs < 1000) {
+		return;
+	}
+	m_lastGlobalArchiveVisitScanMs = nowMs;
+
+	QSet<qint64> processedTargetIds;
+	for (auto it = m_mapFuseTrack.constBegin(); it != m_mapFuseTrack.constEnd(); ++it) {
+		const SPxPacketTrackExtended& track = it.value();
+		const qint64 targetId = static_cast<qint64>(it.key()) > 0
+			? static_cast<qint64>(it.key())
+			: static_cast<qint64>(track.secondary.uniqueID);
+		if (targetId <= 0 || processedTargetIds.contains(targetId))
+			continue;
+		processedTargetIds.insert(targetId);
+
+		const bool manuallyFiltered = gConfig->isUniqueIdAlarmFiltered(targetId);
+		const qint64 cognitiveUniqueId = track.secondary.uniqueID > 0
+			? static_cast<qint64>(track.secondary.uniqueID) : targetId;
+		const ArchiveVisitEvidence archiveVisit =
+			gConfig->dbHelper.getRecentArchiveVisitByUniqueId(cognitiveUniqueId);
+		if (!archiveVisit.shouldTriggerGlobalSurfaceAlarm(manuallyFiltered))
+			continue;
+
+		AlarmRule directRule{};
+		directRule.condition_id = QStringLiteral("archive_visit_global");
+		directRule.name = QStringLiteral("知识库命中全局直告警");
+		directRule.track_type = 0;
+		directRule.alarmstate = 1;
+		directRule.alarm_level = 3;
+		directRule.group_id = 0;
+		directRule.area_id = 0;
+
+		AreaEscalationEvaluator::Result result;
+		result.targetId = targetId;
+		result.domain = AreaEscalationEvaluator::TargetDomain::Surface;
+		result.laneId = QStringLiteral("archive_global");
+		result.trackType = 0;
+		result.stage = AreaEscalationEvaluator::Stage::Alarm;
+		result.disposition = AreaEscalationEvaluator::Disposition::VerifySuccess;
+		result.reason = QStringLiteral("archive_visit");
+		result.conditionId = directRule.condition_id;
+		result.eventArea = {0, 0};
+		result.score = qBound(0, gConfig->m_alarmLogic.defaultThreatScore, 100);
+		result.currentPosition = QPointF(track.latDegs, track.longDegs);
+		result.courseDeg = track.norm.min.courseDegrees;
+		result.speedMps = track.norm.min.speedMps;
+		result.hardConditions = QStringLiteral("archive_visit_global_bypass");
+		result.archiveTargetLabel = archiveVisit.targetLabel;
+		const QString content = buildAreaEscalationContent(result);
+
+		logAlarmTraceThrottled(
+			QStringLiteral("global_archive_visit_%1").arg(targetId),
+			QStringLiteral(
+				"GlobalArchiveVisit pass------targetId:%1 cognitiveUniqueId:%2 "
+				"archiveTarget:%3 bypass:scheme_area_rules")
+				.arg(targetId).arg(cognitiveUniqueId)
+				.arg(archiveVisit.targetLabel),
+			10000);
+		SaveToDB(directRule, targetId, track.latDegs, track.longDegs,
+			track.norm.min.speedMps, track.norm.min.courseDegrees,
+			track.norm.min.rangeMetres, 0, result.score,
+			static_cast<int>(track.msgTimeSecs), 0, content,
+			static_cast<int>(result.stage), 3, result.reason);
+	}
+}
+
 bool TrackAlarmThread::isTrackInGroupArea(QPointF pt)
 {
 	bool isInGroup = false;
@@ -856,53 +928,6 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 						"area:%2 domain:%3 hasPublishedAlarm:1 conditionId:%4")
 						.arg(targetId).arg(exactNoAlarmAreaKey).arg(noAlarmDomain).arg(info.condition_id),
 					30000);
-			}
-
-			// 对海知识库命中是最高优先级的业务告警证据：当前规则的区域候选已经
-			// 在调用本函数前形成，命中后只保留 SaveToDB 内的人工删除过滤。
-			if (type == 0) {
-				const DataAccessLayer::DetectionTypeResult cognitive =
-					cognitiveEvidenceForUniqueId(cognitiveUniqueId);
-				if (cognitive.archiveVisit.matched) {
-					AreaEscalationEvaluator::Result archiveResult;
-					archiveResult.targetId = targetId;
-					archiveResult.domain = AreaEscalationEvaluator::TargetDomain::Surface;
-					archiveResult.laneId = QStringLiteral("legacy");
-					archiveResult.trackType = info.track_type;
-					archiveResult.stage = AreaEscalationEvaluator::Stage::Alarm;
-					archiveResult.disposition =
-						AreaEscalationEvaluator::Disposition::VerifySuccess;
-					archiveResult.reason = QStringLiteral("archive_visit");
-					archiveResult.conditionId = info.condition_id;
-					archiveResult.eventArea = {info.group_id, info.area_id};
-					archiveResult.score = qBound(0, al.defaultThreatScore, 100);
-					archiveResult.insideAlarm = true;
-					archiveResult.currentPosition = QPointF(track.latDegs, track.longDegs);
-					archiveResult.courseDeg = track.norm.min.courseDegrees;
-					archiveResult.speedMps = track.norm.min.speedMps;
-					archiveResult.hardConditions = QStringLiteral("archive_visit_bypass");
-					archiveResult.archiveTargetLabel =
-						cognitive.archiveVisit.targetLabel;
-					const QString archiveContent =
-						buildAreaEscalationContent(archiveResult);
-					logAlarmTrace(QStringLiteral(
-						"updataAlarmTrackToDB pass------targetId:%1 path:archive_visit "
-						"cognitiveUniqueId:%2 archiveTarget:%3 area:%4/%5 "
-						"speed:%6 course:%7 bypass:all_regular_filters conditionId:%8")
-						.arg(targetId).arg(cognitiveUniqueId)
-						.arg(cognitive.archiveVisit.targetLabel)
-						.arg(info.group_id).arg(info.area_id)
-						.arg(track.norm.min.speedMps, 0, 'f', 2)
-						.arg(track.norm.min.courseDegrees, 0, 'f', 2)
-						.arg(info.condition_id));
-					SaveToDB(info, targetId, track.latDegs, track.longDegs,
-						track.norm.min.speedMps, track.norm.min.courseDegrees,
-						track.norm.min.rangeMetres, type, archiveResult.score,
-						static_cast<int>(track.msgTimeSecs), radarSourceId,
-						archiveContent, static_cast<int>(archiveResult.stage), 3,
-						archiveResult.reason);
-					continue;
-				}
 			}
 
 			// 告警规则判断逻辑：优先处理黑白名单，然后进行其他条件过滤
@@ -1881,12 +1906,6 @@ AreaEscalationEvaluator::AreaEvidence TrackAlarmThread::evaluateAreaEscalationEv
 	AreaEscalationEvaluator::AreaEvidence evidence;
 	evidence.available = insideArea;
 	evidence.conditionId = rule.condition_id;
-	if (rule.track_type == 0 && detection.archiveVisit.matched) {
-		evidence.archiveVisitMatched = true;
-		evidence.archiveTargetLabel = detection.archiveVisit.targetLabel;
-		evidence.archiveThreatScore = qBound(
-			0, gConfig->m_alarmLogic.defaultThreatScore, 100);
-	}
 
 	QStringList failures;
 	auto reject = [&](bool* field, const QString& reason) {
@@ -2577,6 +2596,7 @@ void TrackAlarmThread::processAlarms()
 		m_mapAISTrail = gConfig->m_mapAISTrail;
 	}
 	m_cognitiveEvidenceCache.clear();
+	processGlobalArchiveVisitAlarms();
 	int trailCount = 2;
 	QList< AlarmRule> waringList = gConfig->m_mapAlarmRule.values();
 	const bool areaEscalationActive = configureAreaEscalation(waringList);

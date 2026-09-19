@@ -231,6 +231,12 @@ public:
     // 历史函数名保留兼容；实际按 cognitive_results_comprehensive.unique_id 点查。
     DetectionTypeResult getDetectionTypesByReId(qint64 uniqueId);
 
+    /**
+     * 仅供知识库全局直告警使用：只返回最近 30 秒内的知识库结果。
+     * 独立于通用认知查询，避免新鲜度限制影响目标类型、LLM 或威胁分。
+     */
+    ArchiveVisitEvidence getRecentArchiveVisitByUniqueId(qint64 uniqueId);
+
     struct CognitiveTypeJudgeRow {
         qint64 uniqueId = 0;
         QString camTargetType;
@@ -280,6 +286,8 @@ public:
     AreaInfo getAlarmArea(int groupID, int areaID);
     QList<AreaInfo> getGroupArea(int groupID);
     QList<AreaInfo> getAreaInfo();
+    // 仅供 GetTargetThreat 查询：读取方案自身的预警/告警区域及保护区，不依赖规则。
+    QList<AreaInfo> getTargetThreatQueryAreas(const QString& schemeId);
 
     QList<AlarmPicInfo> getAlarmPicCollections(QString alarmId);
     QFuture<bool> addAlarmPicAsync(const QList<AlarmPicInfo>& collections);

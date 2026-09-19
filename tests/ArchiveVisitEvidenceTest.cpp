@@ -34,6 +34,15 @@ int main(int argc, char** argv)
     CHECK("非法字符串不命中",
           !ArchiveVisitEvidence::fromDatabase(QStringLiteral("visited"), QString()).matched);
 
+    CHECK("知识库命中独立触发对海直告警",
+          exact.shouldTriggerGlobalSurfaceAlarm(false));
+    CHECK("人工结束过滤仍抑制知识库直告警",
+          !exact.shouldTriggerGlobalSurfaceAlarm(true));
+    const ArchiveVisitEvidence notMatched =
+        ArchiveVisitEvidence::fromDatabase(QStringLiteral("false"), QStringLiteral("紫东"));
+    CHECK("未命中知识库不触发全局直告警",
+          !notMatched.shouldTriggerGlobalSurfaceAlarm(false));
+
     qInfo() << "ArchiveVisitEvidence tests completed, failures=" << failures;
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
