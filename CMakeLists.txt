@@ -42,6 +42,7 @@ set(ALARM_SOURCES
     "${ALARM_SRC_DIR}/dialog/alarm/AlarmAreaGeometryParser.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/ArchiveVisitEvidence.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AirAlarmEligibility.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AlarmTargetEligibility.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/NoAlarmAreaPolicy.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/TrackAlarmThread.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AreaEscalationEvaluator.cpp"
@@ -209,6 +210,7 @@ add_test(NAME area_escalation_evaluator_test COMMAND area_escalation_evaluator_t
 add_executable(air_alarm_eligibility_test
     "${CMAKE_SOURCE_DIR}/tests/AirAlarmEligibilityTest.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AirAlarmEligibility.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AlarmTargetEligibility.cpp"
 )
 target_include_directories(air_alarm_eligibility_test PRIVATE
     "${ALARM_SRC_DIR}"
@@ -220,6 +222,21 @@ set_target_properties(air_alarm_eligibility_test PROPERTIES
     AUTOMOC OFF
 )
 add_test(NAME air_alarm_eligibility_test COMMAND air_alarm_eligibility_test)
+
+add_executable(alarm_target_eligibility_test
+    "${CMAKE_SOURCE_DIR}/tests/AlarmTargetEligibilityTest.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AlarmTargetEligibility.cpp"
+)
+target_include_directories(alarm_target_eligibility_test PRIVATE
+    "${ALARM_SRC_DIR}"
+    "${SPX_INCLUDES}"
+)
+target_link_libraries(alarm_target_eligibility_test PRIVATE Qt5::Core Qt5::Gui)
+set_target_properties(alarm_target_eligibility_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    AUTOMOC OFF
+)
+add_test(NAME alarm_target_eligibility_test COMMAND alarm_target_eligibility_test)
 
 add_executable(no_alarm_area_policy_test
     "${CMAKE_SOURCE_DIR}/tests/NoAlarmAreaPolicyTest.cpp"
@@ -345,6 +362,7 @@ add_executable(new_track_struct_routing_test
     "${CMAKE_SOURCE_DIR}/tests/NewTrackStructRoutingTest.cpp"
     "${ALARM_SRC_DIR}/grpc_track/new_track_struct_grpc_convert.cpp"
     "${ALARM_SRC_DIR}/dialog/alarm/AirAlarmEligibility.cpp"
+    "${ALARM_SRC_DIR}/dialog/alarm/AlarmTargetEligibility.cpp"
     "${GRPC_NEW_TRACK_STRUCT_GEN_DIR}/target_stream.pb.cc"
 )
 target_include_directories(new_track_struct_routing_test PRIVATE

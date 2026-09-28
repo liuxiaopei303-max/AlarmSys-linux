@@ -2,6 +2,7 @@
 #include "target_stream.pb.h"
 #include "datastruct/commonStruct.h"
 #include "dialog/alarm/AirAlarmEligibility.h"
+#include "dialog/alarm/AlarmTargetEligibility.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -89,7 +90,8 @@ int main(int argc, char** argv)
     SPxPacketTrackExtended convertedSelfReportedDrone;
     if (!NewTrackStructGrpcConvert::targetToSpxExtended(
             selfReportedDrone, convertedSelfReportedDrone, true)
-        || convertedSelfReportedDrone.fusion.trackID[0] != 4001U) {
+        || convertedSelfReportedDrone.fusion.trackID[0] != 4001U
+        || !AlarmTargetEligibility::isExplicitSelfReport(convertedSelfReportedDrone)) {
         qCritical() << "self-report source track id was not preserved for air allow-list"
                     << convertedSelfReportedDrone.fusion.trackID[0];
         return 1;
@@ -150,6 +152,13 @@ int main(int argc, char** argv)
         || unifiedAirDecision.domain != NewTrackStructGrpcConvert::TargetRouteDomain::Air) {
         qCritical() << "unified virtual air target was not routed to AIR"
                     << unifiedAirDecision.reason;
+        return 1;
+    }
+    SPxPacketTrackExtended convertedUnifiedAir;
+    if (!NewTrackStructGrpcConvert::targetToSpxExtended(
+            unifiedAirTarget, convertedUnifiedAir, true)
+        || !AlarmTargetEligibility::isExplicitVirtual(convertedUnifiedAir)) {
+        qCritical() << "virtual air provenance was not preserved";
         return 1;
     }
 

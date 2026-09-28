@@ -356,6 +356,7 @@ public:
     QList<ThreatAssessmentParams> m_listThreatAssessmentParams; //威胁度研判参数
     QString m_activeAlarmSchemeId; // 与 alarm_setting 同一代次发布的激活方案 ID
     bool m_demoParallelUpgrade = false;
+    bool m_selfReportVirtualOnly = false; // 当前方案仅允许 5/6/7 号自报位无人机和明确虚兵
     NoAlarmAreaPolicy::AreaDomainMap m_activeSchemeNoAlarmAreas; // 精确区域 -> 海/空目标域
     QMap<QString, QPair<int, int>> m_mapSchemeProtectAreas; //方案保护区信息 <"groupId_areaId", <protectGroupId, protectAreaId>>
     QMap<int, TargetInfoFilter> m_mapTargetInfoFilter; //目标信息过滤

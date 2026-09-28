@@ -4,6 +4,7 @@
 #include "DemoRecognitionMatcher.h"
 #include "AlarmAreaGeometryParser.h"
 #include "AirAlarmEligibility.h"
+#include "AlarmTargetEligibility.h"
 #include "AlarmContentBuilder.h"
 #include "AlarmFileLogger.h"
 #include "ThreatAssessmentCalculator.h"
@@ -829,7 +830,8 @@ void  TrackAlarmThread::updataAlarmTrackToDB(QSet<qint64> trackID, AlarmRule inf
 							10000);
 					}
 				}
-				if (radarSourceId == al.birdRadarSourceId) {
+				if (radarSourceId == al.birdRadarSourceId
+					&& !gConfig->m_selfReportVirtualOnly) {
 					// 对空融合(type==3, radarSourceId=9)：fusion.trackID[0..7] 任一在黑名单则跳过
 					const int skipFusionTid = findBirdSkipFusionTrackId(track, al.birdSkipTrackIds);
 					if (skipFusionTid > 0) {
@@ -2092,7 +2094,9 @@ void TrackAlarmThread::processAreaEscalation()
 			}
 			if (domain == AreaEscalationEvaluator::TargetDomain::Air) {
 				const AirAlarmEligibility::Decision admission =
-					AirAlarmEligibility::decide(track, gConfig->m_alarmLogic);
+					AirAlarmEligibility::decide(
+						track, gConfig->m_alarmLogic,
+						gConfig->m_selfReportVirtualOnly);
 				if (admission.skip) {
 					m_areaEscalationEvaluator.clearTarget(domain, targetId);
 					logAlarmTraceThrottled(
@@ -2595,6 +2599,21 @@ void TrackAlarmThread::processAlarms()
 		copyTrailForLiveTracks(m_mapBirdRadarTrail, gConfig->m_mapBirdFuseTrail, gConfig->m_mapBirdFuseTrack);
 		m_mapAISTrail = gConfig->m_mapAISTrail;
 	}
+	if (gConfig->m_selfReportVirtualOnly) {
+		auto retainEligible = [](auto& tracks) {
+			for (auto it = tracks.begin(); it != tracks.end();) {
+				if (!AlarmTargetEligibility::decide(it.value(), true).eligible)
+					it = tracks.erase(it);
+				else
+					++it;
+			}
+		};
+		retainEligible(m_mapFuseTrack);
+		retainEligible(m_mapRadarTrack);
+		retainEligible(m_mapBirdRadarTrack);
+		m_mapAISTrack.clear();
+		m_mapAISTrail.clear();
+	}
 	m_cognitiveEvidenceCache.clear();
 	processGlobalArchiveVisitAlarms();
 	int trailCount = 2;
@@ -2972,7 +2991,9 @@ void TrackAlarmThread::processAlarms()
 							if (gConfig->m_alarmLogic.mode == 0)
 							{
 								const int type = it_radar.value().norm.min.reserved1;
-								if (type != 3)
+								if (type != 3
+									&& !(gConfig->m_selfReportVirtualOnly
+										&& AlarmTargetEligibility::isExplicitVirtual(it_radar.value())))
 								{
 									it_radar++;
 									continue;

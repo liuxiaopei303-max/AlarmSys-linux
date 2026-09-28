@@ -423,6 +423,7 @@ CustomConfig::CustomConfig()
     m_listThreatAssessmentParams = dbHelper.getThreatAssessmentParams();
     m_activeAlarmSchemeId = dbHelper.getActiveSchemeId();
     m_demoParallelUpgrade = dbHelper.getDemoParallelUpgrade(m_activeAlarmSchemeId);
+    m_selfReportVirtualOnly = dbHelper.getSelfReportVirtualOnly(m_activeAlarmSchemeId);
     m_activeSchemeNoAlarmAreas = dbHelper.getSchemeNoAlarmAreas(m_activeAlarmSchemeId);
     m_mapSchemeProtectAreas = dbHelper.getActiveSchemeProtectAreas();
 
@@ -906,6 +907,8 @@ void CustomConfig::reloadAlarmConfigFromDb(const QString& scope)
         const QList<AreaInfo> nextAlarmAreas = dbHelper.getAreaInfo();
         const QString nextActiveSchemeId = dbHelper.getActiveSchemeId();
         const bool nextDemoParallelUpgrade = dbHelper.getDemoParallelUpgrade(nextActiveSchemeId);
+        const bool nextSelfReportVirtualOnly =
+            dbHelper.getSelfReportVirtualOnly(nextActiveSchemeId);
         const NoAlarmAreaPolicy::AreaDomainMap nextNoAlarmAreas =
             dbHelper.getSchemeNoAlarmAreas(nextActiveSchemeId);
         const QMap<QString, QPair<int, int>> nextProtectAreas =
@@ -917,6 +920,7 @@ void CustomConfig::reloadAlarmConfigFromDb(const QString& scope)
             m_alarmArea = nextAlarmAreas;
             m_activeAlarmSchemeId = nextActiveSchemeId;
             m_demoParallelUpgrade = nextDemoParallelUpgrade;
+            m_selfReportVirtualOnly = nextSelfReportVirtualOnly;
             m_activeSchemeNoAlarmAreas = nextNoAlarmAreas;
             m_mapSchemeProtectAreas = nextProtectAreas;
             // 方案切换/规则重载是事件生命周期边界：清除旧方案内存快照，
@@ -929,6 +933,7 @@ void CustomConfig::reloadAlarmConfigFromDb(const QString& scope)
         qInfo() << "热更新 alarm_rules: alarm_setting" << m_mapAlarmRule.size()
                 << "area" << m_alarmArea.size()
                 << "scheme" << m_activeAlarmSchemeId
+                << "self_report_virtual_only" << m_selfReportVirtualOnly
                 << "no_alarm_areas" << m_activeSchemeNoAlarmAreas.size()
                 << "cleared_active_events" << clearedAlarmCount;
     }

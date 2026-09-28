@@ -1892,6 +1892,17 @@ bool DataAccessLayer::getDemoParallelUpgrade(const QString& schemeId)
     return row.next() && row.value(QStringLiteral("enabled")).toBool();
 }
 
+bool DataAccessLayer::getSelfReportVirtualOnly(const QString& schemeId)
+{
+    const QSqlQuery result = m_dbManager.executeQuery(
+        QStringLiteral(
+            "SELECT COALESCE(self_report_virtual_only, false) AS enabled "
+            "FROM alarm_scheme_target_filters WHERE scheme_id = ?"),
+        {schemeId});
+    QSqlQuery row = result;
+    return row.next() && row.value(QStringLiteral("enabled")).toBool();
+}
+
 NoAlarmAreaPolicy::AreaDomainMap
 DataAccessLayer::getSchemeNoAlarmAreas(const QString& schemeId)
 {

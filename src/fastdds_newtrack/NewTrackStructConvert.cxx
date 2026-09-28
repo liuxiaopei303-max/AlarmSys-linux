@@ -1,4 +1,5 @@
 #include "NewTrackStructConvert.hpp"
+#include "dialog/alarm/AlarmTargetEligibility.h"
 
 #include <cmath>
 #include <cstring>
@@ -81,6 +82,7 @@ void fillFusionTrackIds(const TargetFull::TargetObject& t, SPxPacketTrackExtende
         ? topLevelId : zibaoweiTrackIdFromFusionSources(t);
     if (zibaoweiId != 0U) {
         out.fusion.trackID[0] = zibaoweiId;
+        AlarmTargetEligibility::markExplicitSelfReport(out);
     }
 }
 
@@ -231,6 +233,10 @@ bool targetToSpxExtended(
     }
 
     out.norm.reserved3 = static_cast<uint32_t>(threatScoreFromPriority(t));
+
+    if (t.reality_type() == TargetFull::RealityType::VIRTUAL) {
+        AlarmTargetEligibility::markExplicitVirtual(out);
+    }
 
     fillFusionTrackIds(t, out);
     applyAirTargetReserved1(t, out);

@@ -1,6 +1,7 @@
 #include "SuspiciousTargetThread.h"
 
 #include "AlarmFileLogger.h"
+#include "AlarmTargetEligibility.h"
 #include "common/commonfunc.h"
 
 #include <QDateTime>
@@ -357,6 +358,19 @@ void SuspiciousTargetThread::processSuspiciousTargets()
         airFuseTrackMap = gConfig->m_mapBirdFuseTrack;
     }
 
+    if (gConfig->m_selfReportVirtualOnly) {
+        auto retainEligible = [](auto& tracks) {
+            for (auto it = tracks.begin(); it != tracks.end();) {
+                if (!AlarmTargetEligibility::decide(it.value(), true).eligible)
+                    it = tracks.erase(it);
+                else
+                    ++it;
+            }
+        };
+        retainEligible(seaFuseTrackMap);
+        retainEligible(airFuseTrackMap);
+    }
+
     QSet<QString> suspiciousSeaIds;
     for (auto it = seaFuseTrackMap.constBegin(); it != seaFuseTrackMap.constEnd(); ++it) {
         evaluateTrack(
@@ -374,10 +388,13 @@ void SuspiciousTargetThread::processSuspiciousTargets()
     int airBirdFilteredCount = 0;
     QSet<QString> suspiciousAirIds;
     for (auto it = airFuseTrackMap.constBegin(); it != airFuseTrackMap.constEnd(); ++it) {
-        if (!isAirDroneTrack(it.value())) {
+        if (!isAirDroneTrack(it.value())
+            && !(gConfig->m_selfReportVirtualOnly
+                 && AlarmTargetEligibility::isExplicitVirtual(it.value()))) {
             continue;
         }
-        if (shouldSkipBirdAirTrackForSuspicious(it.value(), alBird)) {
+        if (!gConfig->m_selfReportVirtualOnly
+            && shouldSkipBirdAirTrackForSuspicious(it.value(), alBird)) {
             ++airBirdFilteredCount;
             m_mapSpeedLowLastCheckAir.remove(it.key());
             m_mapSpeedHighLastCheckAir.remove(it.key());

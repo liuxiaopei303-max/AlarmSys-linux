@@ -1,4 +1,5 @@
 #include "new_track_struct_grpc_convert.h"
+#include "dialog/alarm/AlarmTargetEligibility.h"
 
 #ifdef signals
 #pragma push_macro("signals")
@@ -139,6 +140,7 @@ void fillFusionTrackIds(const TargetObject& t, SPxPacketTrackExtended& out)
         ? topLevelId : zibaoweiTrackIdFromFusionSources(t);
     if (zibaoweiId != 0U) {
         out.fusion.trackID[0] = zibaoweiId;
+        AlarmTargetEligibility::markExplicitSelfReport(out);
     }
 }
 
@@ -323,6 +325,9 @@ bool targetToSpxExtended(const TargetObject& t, SPxPacketTrackExtended& out, boo
         out.secondary.uniqueID = static_cast<uint32_t>(targetId & 0xFFFFFFFFULL);
     }
     out.norm.reserved3 = threatScoreFromPriority(t);
+    if (t.reality_type() == RealityType_VIRTUAL) {
+        AlarmTargetEligibility::markExplicitVirtual(out);
+    }
     if (t.reality_type() == RealityType_VIRTUAL
         && t.environment() == EnvironmentType_SURFACE
         && t.classified_type() == UnitType_SURFACE_SHIP) {

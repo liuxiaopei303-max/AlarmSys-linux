@@ -1,10 +1,25 @@
 #include "dialog/alarm/AirAlarmEligibility.h"
+#include "dialog/alarm/AlarmTargetEligibility.h"
 
 namespace AirAlarmEligibility {
 
-Decision decide(const SPxPacketTrackExtended& track, const AlarmLogicConfig& config)
+Decision decide(
+    const SPxPacketTrackExtended& track,
+    const AlarmLogicConfig& config,
+    bool selfReportVirtualOnly)
 {
     Decision decision;
+
+    if (selfReportVirtualOnly) {
+        const AlarmTargetEligibility::Decision targetDecision =
+            AlarmTargetEligibility::decide(track, true);
+        if (!targetDecision.eligible) {
+            decision.skip = true;
+            decision.matchedFusionTrackId = targetDecision.matchedSelfReportTrackId;
+            decision.reason = targetDecision.reason;
+        }
+        return decision;
+    }
 
     // Mode=0 的对空规则只接受分类为 DRONE 的融合航迹。
     if (config.mode == 0 && track.norm.min.reserved1 != 3) {

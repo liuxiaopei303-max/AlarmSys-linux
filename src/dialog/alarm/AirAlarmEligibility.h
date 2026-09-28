@@ -21,6 +21,9 @@ struct Decision
  * 4001），不是前端显示的融合 target_id。上游可把多个源写入
  * fusion.trackID[0..7]，因此所有槽位都必须检查。
  */
-Decision decide(const SPxPacketTrackExtended& track, const AlarmLogicConfig& config);
+Decision decide(
+    const SPxPacketTrackExtended& track,
+    const AlarmLogicConfig& config,
+    bool selfReportVirtualOnly = false);
 
 } // namespace AirAlarmEligibility

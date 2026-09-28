@@ -1,4 +1,5 @@
 #include "dialog/alarm/AirAlarmEligibility.h"
+#include "dialog/alarm/AlarmTargetEligibility.h"
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -68,6 +69,18 @@ int main(int argc, char** argv)
           !AirAlarmEligibility::decide(nonDrone, config).skip);
     CHECK("Mode=1 仍应应用无人机白名单",
           AirAlarmEligibility::decide(droneWithSourceId(4001), config).skip);
+
+    SPxPacketTrackExtended allowedSelfReport = droneWithSourceId(4005);
+    AlarmTargetEligibility::markExplicitSelfReport(allowedSelfReport);
+    CHECK("方案过滤开启时 5 号自报位无人机放行",
+          !AirAlarmEligibility::decide(allowedSelfReport, config, true).skip);
+    CHECK("方案过滤开启时其他无人机排除",
+          AirAlarmEligibility::decide(droneWithSourceId(4008), config, true).skip);
+
+    SPxPacketTrackExtended virtualNonDrone = nonDrone;
+    AlarmTargetEligibility::markExplicitVirtual(virtualNonDrone);
+    CHECK("方案过滤开启时明确虚兵放行",
+          !AirAlarmEligibility::decide(virtualNonDrone, config, true).skip);
 
     qInfo() << "Air alarm eligibility tests completed, failures=" << failures;
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
